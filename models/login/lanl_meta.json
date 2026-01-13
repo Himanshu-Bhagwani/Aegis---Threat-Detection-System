@@ -1,0 +1,12 @@
+{
+  "feature_cols": [
+    "user_deg",
+    "comp_deg",
+    "time_since_user_last",
+    "time_since_comp_last",
+    "hour_of_day",
+    "is_new_user",
+    "is_new_comp"
+  ],
+  "scaler_path": "../models/login\\lanl_scaler.joblib"
+}
