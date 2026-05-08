@@ -1,246 +1,356 @@
+"use client";
+
+import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useEffect, useRef } from "react";
 
-import { AppShell } from "@/components/app-shell";
+const ParticleHero = dynamic(() => import("@/components/three/ParticleHero"), { ssr: false });
 
-const heroCTA = [
-  { label: "Get Started", href: "/signup", variant: "primary" as const },
-  { label: "Learn How It Works", href: "#how-it-works", variant: "ghost" as const }
+/* ─── Feature data ───────────────────────────────────── */
+const FEATURES = [
+  {
+    icon: "◉",
+    title: "GPS Spoofing Detection",
+    desc: "Machine-learning models detect real-time location fraud. Flags mock GPS apps, emulator signals, and impossible velocity jumps.",
+    color: "var(--accent)",
+  },
+  {
+    icon: "◐",
+    title: "Login Anomaly Engine",
+    desc: "Behavioral baseline per user. Detects unusual login hours, new device access, rapid credential cycling, and brute-force patterns.",
+    color: "var(--risk-medium)",
+  },
+  {
+    icon: "◑",
+    title: "Breach Intelligence",
+    desc: "k-anonymity HIBP lookups — only 5 chars of your SHA-1 hash ever leave the device. Scores password exposure and entropy in real time.",
+    color: "var(--risk-high)",
+  },
+  {
+    icon: "◆",
+    title: "Fraud Transaction Scoring",
+    desc: "XGBoost + Isolation Forest ensemble. Scores each transaction across amount, geography, merchant velocity, and time-of-day signals.",
+    color: "var(--risk-critical)",
+  },
+  {
+    icon: "◍",
+    title: "Device Fingerprinting",
+    desc: "SHA-256 stable device IDs. Weighted similarity scoring across platform, screen, timezone, WebGL renderer, and audio context fingerprint.",
+    color: "var(--risk-low)",
+  },
+  {
+    icon: "⬡",
+    title: "Unified Fusion Engine",
+    desc: "Weighted, max-threat, and Bayesian fusion strategies combine all signals into a single actionable risk score per identity event.",
+    color: "var(--accent)",
+  },
 ];
 
-const featureList = [
-  {
-    title: "Real-Time Threat Monitoring",
-    description:
-      "Detect login anomalies, data breaches, and GPS spoofing attempts within seconds.",
-    icon: "🛰️"
-  },
-  {
-    title: "AI-Powered Fraud Detection",
-    description:
-      "Isolation Forest and Autoencoder models running on SageMaker to flag emerging threats.",
-    icon: "🤖"
-  },
-  {
-    title: "Privacy-Preserving Scans",
-    description:
-      "Hashed lookups with Bloom filters keep sensitive identity data protected end-to-end.",
-    icon: "🔐"
-  },
-  {
-    title: "Multi-Channel Alerts",
-    description:
-      "Instant notifications across email, SMS, and dashboard powered by AWS SNS and Pinpoint.",
-    icon: "📡"
-  },
-  {
-    title: "AWS Cloud Security Backbone",
-    description:
-      "Encryption with AWS KMS, observability with CloudWatch, and resilience across the stack.",
-    icon: "☁️"
-  }
+const STEPS = [
+  { num: "01", title: "Event Arrives",   desc: "Login, transaction, GPS ping, or app-unlock fires from your client SDK or REST call." },
+  { num: "02", title: "Parallel Scoring",desc: "All five detection modules score simultaneously — no sequential bottleneck." },
+  { num: "03", title: "Fusion",          desc: "Scores are fused using your chosen strategy and weighted by confidence levels." },
+  { num: "04", title: "Action",          desc: "Risk result returned in <50 ms. SNS fires if critical. Dashboard updates via WebSocket." },
 ];
 
-const workflow = [
-  {
-    title: "User Onboarding",
-    summary: "Secure enrollment with AWS Cognito MFA and contextual risk checks."
-  },
-  {
-    title: "Data Monitoring",
-    summary: "Identity telemetry streams into Apelio for breach and anomaly screening."
-  },
-  {
-    title: "AI Detection",
-    summary: "ML engines evaluate patterns for spoofing, account takeovers, and fraud."
-  },
-  {
-    title: "Alerts & Recommendations",
-    summary: "Targeted guidance helps resolve incidents faster via the Apelio dashboard."
-  }
+const STATS = [
+  { value: "<50ms",  label: "P99 Detection Latency" },
+  { value: "5",      label: "Detection Modules"      },
+  { value: "100%",   label: "AWS-Native Stack"        },
+  { value: "k-anon", label: "Privacy Architecture"   },
 ];
 
-const differentiators = [
-  {
-    problem: "Complex manual fraud detection",
-    solution: "Automated, ML-driven detection pipelines tailored to identity risk."
-  },
-  {
-    problem: "Slow response to threats",
-    solution: "Real-time Lambda + SageMaker inference with proactive auto-remediation."
-  },
-  {
-    problem: "Privacy risk during breach checks",
-    solution: "Secure hash-based verification—raw data never leaves the user boundary."
-  },
-  {
-    problem: "Lack of cloud security",
-    solution: "AWS-native encryption, logging, and monitoring baked into every layer."
-  }
-];
+/* ─── Scroll-reveal hook ─────────────────────────────── */
+function useReveal() {
+  useEffect(() => {
+    const els = document.querySelectorAll(".reveal");
+    const io  = new IntersectionObserver(
+      entries => entries.forEach(e => e.isIntersecting && e.target.classList.add("revealed")),
+      { threshold: 0.12 },
+    );
+    els.forEach(el => io.observe(el));
+    return () => io.disconnect();
+  }, []);
+}
 
-const dashboardHighlights = [
-  {
-    title: "Threat Intelligence Feed",
-    detail: "Track alerts by severity with context-rich timelines and recommended actions."
-  },
-  {
-    title: "Anomaly Analytics",
-    detail: "Visualize login anomalies, velocity risks, and GPS deviations in real time."
-  },
-  {
-    title: "Global Exposure Map",
-    detail: "Pinpoint suspicious access by geography and device fingerprint."
-  },
-  {
-    title: "Privacy Health Report",
-    detail: "Monitor breach status, hashed leak checks, and remediation playbooks."
-  }
-];
+/* ─── Component ──────────────────────────────────────── */
+export default function LandingPage() {
+  useReveal();
 
-export default function Home() {
-  const landingContent = (
-    <main className="landing">
-      <section className="landing-hero" id="top">
-        <div className="landing-hero-content">
-          <span className="landing-eyebrow">Identity Intelligence Platform</span>
-          <h1>Apelio: Intelligent Fraud Detection for the Modern World</h1>
-          <p>
-            Protect your digital identity with real-time fraud detection,
-            privacy-preserving monitoring, and AI-driven fraud alerts — powered by AWS.
+  return (
+    <div style={{ background: "var(--bg-base)", minHeight: "100vh", overflowX: "hidden" }}>
+
+      {/* ── Nav bar ───────────────────────────────── */}
+      <nav style={{
+        position: "fixed", top: 0, left: 0, right: 0, zIndex: 100,
+        display: "flex", alignItems: "center", padding: "0 40px",
+        height: 60,
+        background: "rgba(8,9,13,0.85)",
+        backdropFilter: "blur(12px)",
+        borderBottom: "1px solid var(--border-subtle)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}>
+          <div style={{
+            width: 30, height: 30, borderRadius: 8,
+            background: "var(--accent)", display: "flex",
+            alignItems: "center", justifyContent: "center",
+            fontSize: 15, fontWeight: 700, color: "#fff",
+          }}>Æ</div>
+          <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em" }}>Apeilo</span>
+          <span style={{ fontSize: 10, color: "var(--text-disabled)", letterSpacing: "0.08em",
+            textTransform: "uppercase", marginLeft: 2 }}>Threat Detection</span>
+        </div>
+        <div style={{ display: "flex", gap: 28, fontSize: 13, color: "var(--text-secondary)" }}>
+          <a href="#features"  style={{ color: "inherit", textDecoration: "none" }}>Features</a>
+          <a href="#how"       style={{ color: "inherit", textDecoration: "none" }}>How It Works</a>
+          <Link href="/login"  style={{ color: "inherit", textDecoration: "none" }}>Sign In</Link>
+          <Link href="/signup" className="btn-primary" style={{ fontSize: 13, padding: "6px 16px" }}>
+            Get Started
+          </Link>
+        </div>
+      </nav>
+
+      {/* ── Hero ─────────────────────────────────── */}
+      <section style={{
+        position: "relative", minHeight: "100vh",
+        display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center",
+        overflow: "hidden",
+      }}>
+        {/* Three.js particle canvas */}
+        <div style={{ position: "absolute", inset: 0, zIndex: 0 }}>
+          <ParticleHero />
+        </div>
+
+        {/* Hero text */}
+        <div style={{
+          position: "relative", zIndex: 1, textAlign: "center",
+          maxWidth: 720, padding: "0 24px",
+          animation: "fadeUp 0.9s ease both",
+        }}>
+          <div style={{
+            display: "inline-flex", alignItems: "center", gap: 8,
+            padding: "5px 14px", borderRadius: 20,
+            background: "rgba(61,127,255,0.10)",
+            border: "1px solid rgba(61,127,255,0.25)",
+            fontSize: 11, color: "var(--accent)",
+            letterSpacing: "0.08em", textTransform: "uppercase",
+            fontWeight: 600, marginBottom: 24,
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", display: "inline-block" }} />
+            Real-time identity threat detection
+          </div>
+
+          <h1 style={{
+            fontSize: "clamp(2.4rem, 6vw, 4rem)",
+            fontWeight: 800,
+            lineHeight: 1.08,
+            letterSpacing: "-0.03em",
+            color: "var(--text-primary)",
+            marginBottom: 22,
+          }}>
+            Know when someone isn't<br />
+            <span style={{
+              background: "linear-gradient(90deg, var(--accent), #6db3ff)",
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+            }}>who they say they are.</span>
+          </h1>
+
+          <p style={{
+            fontSize: "clamp(0.95rem, 2vw, 1.15rem)",
+            color: "var(--text-secondary)",
+            maxWidth: 560, margin: "0 auto 36px",
+            lineHeight: 1.7,
+          }}>
+            Apeilo fuses GPS spoofing, login anomalies, breach intelligence, device fingerprints,
+            and transaction fraud into a single risk score — in under 50 ms.
           </p>
-          <div className="hero-cta-row">
-            {heroCTA.map((cta) => (
-              <Link
-                key={cta.label}
-                href={cta.href as any}
-                className={`hero-cta hero-cta-${cta.variant}`}
-              >
-                {cta.label}
-              </Link>
-            ))}
+
+          <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
+            <Link href="/signup" className="btn-primary" style={{ fontSize: 14, padding: "12px 28px" }}>
+              Start Free →
+            </Link>
+            <Link href="/dashboard" className="btn-ghost" style={{ fontSize: 14, padding: "12px 28px" }}>
+              View Demo Dashboard
+            </Link>
           </div>
         </div>
 
-        <div className="landing-hero-visual" aria-hidden="true">
-          <div className="visual-node visual-detected">
-            <span>Threat detected</span>
-          </div>
-          <div className="visual-connector" />
-          <div className="visual-node visual-alert">
-            <span>Alert dispatched</span>
-          </div>
-          <div className="visual-connector" />
-          <div className="visual-node visual-secured">
-            <span>Identity secured</span>
-          </div>
+        {/* Scroll indicator */}
+        <div style={{
+          position: "absolute", bottom: 32, left: "50%", transform: "translateX(-50%)",
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+          color: "var(--text-disabled)", fontSize: 10, letterSpacing: "0.1em",
+          textTransform: "uppercase", animation: "fadeIn 1.5s 1s both",
+        }}>
+          <div style={{
+            width: 1, height: 36,
+            background: "linear-gradient(to bottom, transparent, var(--border))",
+          }} />
+          scroll
         </div>
       </section>
 
-      <section className="landing-section" id="features">
-        <header>
-          <h2>Stay ahead with intelligent defense</h2>
-          <p>
-            Apelio unifies streaming telemetry, AI, and AWS security services to safeguard
-            every digital identity edge.
-          </p>
-        </header>
-        <div className="feature-grid">
-          {featureList.map((feature) => (
-            <article key={feature.title} className="feature-card">
-              <span className="feature-icon">{feature.icon}</span>
-              <h3>{feature.title}</h3>
-              <p>{feature.description}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="landing-section landing-section-alt" id="how-it-works">
-        <header>
-          <h2>How Apelio orchestrates protection</h2>
-          <p>
-            A pipeline built for security teams and researchers—transparent, powerful, and
-            grounded in cloud-native best practices.
-          </p>
-        </header>
-        <div className="workflow">
-          {workflow.map((step, index) => (
-            <div key={step.title} className="workflow-step">
-              <span className="workflow-index">{index + 1}</span>
-              <div>
-                <h3>{step.title}</h3>
-                <p>{step.summary}</p>
+      {/* ── Stats bar ─────────────────────────────── */}
+      <section style={{
+        background: "var(--bg-surface)",
+        borderTop:  "1px solid var(--border-subtle)",
+        borderBottom: "1px solid var(--border-subtle)",
+        padding: "32px 40px",
+      }}>
+        <div style={{
+          maxWidth: 900, margin: "0 auto",
+          display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 20,
+        }}>
+          {STATS.map(s => (
+            <div key={s.label} style={{ textAlign: "center" }} className="reveal">
+              <div style={{
+                fontSize: "clamp(1.6rem, 3vw, 2.2rem)", fontWeight: 800,
+                fontFamily: "var(--font-mono)", color: "var(--accent)",
+                letterSpacing: "-0.02em",
+              }}>{s.value}</div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4,
+                letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                {s.label}
               </div>
             </div>
           ))}
         </div>
-        <div className="workflow-diagram" aria-hidden="true">
-          <span>User</span>
-          <span>Detection</span>
-          <span>ML Engine</span>
-          <span>Alert</span>
-          <span>Dashboard</span>
-        </div>
       </section>
 
-      <section className="landing-section" id="why-apelio">
-        <header>
-          <h2>Why Apelio delivers uncompromised protection</h2>
-          <p>
-            We confront the toughest fraud and identity challenges with automation,
-            observability, and privacy-first design.
-          </p>
-        </header>
-        <div className="differentiator-grid">
-          {differentiators.map((item) => (
-            <div key={item.problem} className="differentiator-card">
-              <h3>Problem</h3>
-              <p>{item.problem}</p>
-              <h4>Our Solution</h4>
-              <p>{item.solution}</p>
+      {/* ── Features ──────────────────────────────── */}
+      <section id="features" style={{ padding: "100px 40px", maxWidth: 1100, margin: "0 auto" }}>
+        <div className="reveal" style={{ textAlign: "center", marginBottom: 60 }}>
+          <div style={{ fontSize: 11, color: "var(--accent)", textTransform: "uppercase",
+            letterSpacing: "0.1em", fontWeight: 600, marginBottom: 14 }}>Detection Stack</div>
+          <h2 style={{ fontSize: "clamp(1.8rem, 4vw, 2.8rem)", fontWeight: 800,
+            letterSpacing: "-0.025em", color: "var(--text-primary)" }}>
+            Every threat vector, covered.
+          </h2>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
+          {FEATURES.map((f, i) => (
+            <div key={f.title} className="panel reveal" style={{
+              padding: "28px 24px",
+              animationDelay: `${i * 0.08}s`,
+              transition: "transform 0.2s, border-color 0.2s",
+              cursor: "default",
+            }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.transform = "translateY(-3px)";
+                (e.currentTarget as HTMLElement).style.borderColor = "var(--border)"; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.transform = "translateY(0)";
+                (e.currentTarget as HTMLElement).style.borderColor = "var(--border-subtle)"; }}
+            >
+              <div style={{
+                width: 40, height: 40, borderRadius: 10,
+                background: `${f.color}14`,
+                border: `1px solid ${f.color}30`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 20, color: f.color, marginBottom: 16,
+              }}>
+                {f.icon}
+              </div>
+              <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 8, color: "var(--text-primary)" }}>
+                {f.title}
+              </h3>
+              <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.65, margin: 0 }}>
+                {f.desc}
+              </p>
             </div>
           ))}
         </div>
       </section>
 
-      <section className="landing-section landing-section-alt" id="dashboard">
-        <header>
-          <h2>The Apelio command center</h2>
-          <p>
-            Preview the dashboard experience that turns streaming identity signals into
-            actionable intelligence.
-          </p>
-        </header>
-        <div className="dashboard-grid">
-          {dashboardHighlights.map((item) => (
-            <article key={item.title} className="dashboard-card">
-              <h3>{item.title}</h3>
-              <p>{item.detail}</p>
-              <div className="dashboard-placeholder" />
-            </article>
-          ))}
+      {/* ── How it works ──────────────────────────── */}
+      <section id="how" style={{
+        background: "var(--bg-surface)",
+        borderTop: "1px solid var(--border-subtle)",
+        borderBottom: "1px solid var(--border-subtle)",
+        padding: "100px 40px",
+      }}>
+        <div style={{ maxWidth: 900, margin: "0 auto" }}>
+          <div className="reveal" style={{ textAlign: "center", marginBottom: 60 }}>
+            <div style={{ fontSize: 11, color: "var(--accent)", textTransform: "uppercase",
+              letterSpacing: "0.1em", fontWeight: 600, marginBottom: 14 }}>Architecture</div>
+            <h2 style={{ fontSize: "clamp(1.8rem, 4vw, 2.8rem)", fontWeight: 800,
+              letterSpacing: "-0.025em", color: "var(--text-primary)" }}>
+              From event to decision in milliseconds.
+            </h2>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+            {STEPS.map((step, i) => (
+              <div key={step.num} className="reveal" style={{ animationDelay: `${i * 0.1}s` }}>
+                <div style={{
+                  fontSize: 11, color: "var(--accent)", fontFamily: "var(--font-mono)",
+                  fontWeight: 700, letterSpacing: "0.08em", marginBottom: 12,
+                }}>
+                  {step.num}
+                  {i < STEPS.length - 1 && (
+                    <span style={{ color: "var(--border)", marginLeft: 8 }}>────</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)", marginBottom: 8 }}>
+                  {step.title}
+                </div>
+                <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.65 }}>
+                  {step.desc}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 
-      <section className="landing-cta">
-        <div className="landing-cta-card">
-          <h2>Ready to secure every identity moment?</h2>
-          <p>
-            Join the early access program to partner on research, shape the roadmap, and
-            unlock full-fidelity monitoring across your organization.
+      {/* ── CTA ───────────────────────────────────── */}
+      <section style={{ padding: "100px 40px", textAlign: "center" }}>
+        <div className="reveal" style={{ maxWidth: 560, margin: "0 auto" }}>
+          <h2 style={{ fontSize: "clamp(1.8rem, 4vw, 2.8rem)", fontWeight: 800,
+            letterSpacing: "-0.025em", color: "var(--text-primary)", marginBottom: 16 }}>
+            Start detecting threats today.
+          </h2>
+          <p style={{ fontSize: 14, color: "var(--text-secondary)", marginBottom: 32, lineHeight: 1.7 }}>
+            No credit card required. Runs fully local in mock mode.
+            Connect AWS to go production in minutes.
           </p>
-          <div className="cta-actions">
-            <Link href="/signup" className="hero-cta hero-cta-primary">
-              Sign Up for Early Access
+          <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+            <Link href="/signup" className="btn-primary" style={{ fontSize: 14, padding: "12px 32px" }}>
+              Create Account →
             </Link>
-            <Link href="/dashboard" className="hero-cta hero-cta-ghost">
-              Access your dashboard
+            <Link href="/dashboard" className="btn-ghost" style={{ fontSize: 14, padding: "12px 32px" }}>
+              Try the Dashboard
             </Link>
           </div>
         </div>
       </section>
-    </main>
-  );
 
-  return <AppShell>{landingContent}</AppShell>;
+      {/* ── Footer ────────────────────────────────── */}
+      <footer style={{
+        borderTop: "1px solid var(--border-subtle)",
+        padding: "28px 40px",
+        display: "flex", alignItems: "center",
+        color: "var(--text-disabled)", fontSize: 12,
+      }}>
+        <span>© {new Date().getFullYear()} Apeilo Threat Detection</span>
+        <span style={{ marginLeft: "auto" }}>
+          Built with FastAPI · Next.js · Three.js · AWS
+        </span>
+      </footer>
+
+      {/* ── Scroll-reveal styles ─────────────────── */}
+      <style>{`
+        .reveal {
+          opacity: 0;
+          transform: translateY(24px);
+          transition: opacity 0.6s ease, transform 0.6s ease;
+        }
+        .reveal.revealed {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      `}</style>
+    </div>
+  );
 }

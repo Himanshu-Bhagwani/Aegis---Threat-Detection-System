@@ -50,7 +50,7 @@ export function Navigation() {
           return (
             <Link
               key={link.href}
-              href={link.href}
+              href={link.href as any}
               className={`app-nav__link${isActive ? " is-active" : ""}`}
             >
               {link.label}

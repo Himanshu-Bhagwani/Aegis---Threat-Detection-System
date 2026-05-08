@@ -1,0 +1,63 @@
+{
+  "name": "@aegis/client-sdk",
+  "version": "1.0.0",
+  "description": "AEGIS Threat Detection client SDK — collects login, GPS, device fingerprint and app-unlock events and streams them to the AEGIS API.",
+  "main": "aegis.js",
+  "module": "aegis.esm.js",
+  "types": "aegis.d.ts",
+  "exports": {
+    ".": {
+      "import": "./aegis.esm.js",
+      "require": "./aegis.js",
+      "types": "./aegis.d.ts"
+    },
+    "./react": {
+      "import": "./aegis.react.js",
+      "require": "./aegis.react.js",
+      "types": "./aegis.react.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "echo 'No build step required — UMD bundle is hand-crafted'",
+    "test": "node -e \"const Aegis = require('./aegis.js'); Aegis.init({ apiUrl: 'http://localhost:8000', userId: 'test' }); console.log('SDK loads OK:', typeof Aegis.trackLogin);\""
+  },
+  "keywords": [
+    "threat-detection",
+    "fraud",
+    "identity",
+    "risk",
+    "aegis",
+    "security",
+    "fingerprint",
+    "gps",
+    "authentication"
+  ],
+  "author": "AEGIS Security",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=17.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "files": [
+    "aegis.js",
+    "aegis.esm.js",
+    "aegis.d.ts",
+    "aegis.react.js",
+    "aegis.react.d.ts",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/aegis-threat-detection.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/aegis-threat-detection/issues"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

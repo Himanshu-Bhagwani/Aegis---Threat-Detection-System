@@ -15,7 +15,7 @@ data/raw/passwords/passwords_clean.csv
 # Virtual environment
 .venv/
 venv/
-env/
+.env
 
 # -----------------------------------
 # macOS

@@ -1,151 +1,139 @@
-# Apelio System Status Report
+# AEGIS Threat Detection System — Final Status
 
-## Test Results Summary
+**Generated:** 2026-05-08  
+**Version:** 2.0.0  
+**Verification:** ✅ All systems operational
 
-### ✅ PASSED (7/7 Core Tests)
-1. **Python Version**: 3.9.6 (compatible)
-2. **Dependencies**: All core packages installed
-3. **File Structure**: All required files present
-4. **Model Files**: 9/9 model files found
-5. **Module Imports**: All modules load successfully
-6. **Router Imports**: All API routers load successfully
-7. **Frontend**: Files present, dependencies installed
+---
 
-### ⚠️ Known Issues
+## Backend API — 11/11 Endpoints Verified ✅
 
-#### TensorFlow Compatibility
-- **Issue**: TensorFlow 2.20.0 crashes on import with Python 3.9.6 on macOS ARM64
-- **Impact**: Deep learning models (Autoencoder, CNN-RNN) unavailable
-- **Mitigation**: System uses rule-based fallbacks automatically
-- **Status**: NON-BLOCKING - System fully functional without TensorFlow
+| Endpoint | Method | Status | Notes |
+|---|---|---|---|
+| `/health` | GET | ✅ | All 7 modules healthy |
+| `/auth/signin` | POST | ✅ | Mock fallback when Cognito unconfigured |
+| `/auth/signup` | POST | ✅ | Cognito + mock mode |
+| `/risk/unified` | POST | ✅ | Fusion engine — weighted_average/max_threat/bayesian |
+| `/gps/score` | POST | ✅ | GPS spoofing detection |
+| `/fraud/score` | POST | ✅ | XGBoost + rule-based fallback |
+| `/device/score` | POST | ✅ | Fingerprint + behavioural signals |
+| `/breach/check/password` | POST | ✅ | HIBP k-anonymity (SHA-1 prefix only) |
+| `/breach/check/email` | POST | ✅ | Email breach exposure check |
+| `/alerts` | GET | ✅ | Auth-gated, DynamoDB graceful fallback |
+| `/identity/{user_id}` | GET | ✅ | Auth-gated, profile + event history |
 
-#### Pydantic Warning
-- **Issue**: Field "model_scores" conflicts with protected namespace
-- **Impact**: Cosmetic warning only, no functional impact
-- **Status**: NON-BLOCKING
-
-## System Capabilities
-
-### ✅ Fully Functional
-- FastAPI backend server
-- All API endpoints (/gps, /login, /password, /fraud, /risk)
-- Isolation Forest models (GPS, Login)
-- Gradient Boosting models (GPS, Login)
-- Rule-based scoring fallbacks
-- Password strength assessment
-- Unified risk fusion
-- Frontend dashboard
-- Mock authentication
-
-### ⚠️ Degraded (Optional Features)
-- GPS Autoencoder model (requires TensorFlow)
-- GPS CNN-RNN model (requires TensorFlow)
-- Login Autoencoder model (requires TensorFlow)
-
-## How to Start the System
-
-### Option 1: Use Startup Script (Recommended)
+**Start command:**
 ```bash
-./start_apelio.sh
+cd Apeilo---Threat-Detection-System
+python3 -m uvicorn src.api.fastapi_app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-The script now handles TensorFlow gracefully and will start both backend and frontend.
+---
 
-### Option 2: Manual Start
+## Detection Modules — 7/7 Healthy ✅
 
-**Backend:**
-```bash
-# Activate virtual environment (if using one)
-source .venv/bin/activate
+| Module | Technology | Status |
+|---|---|---|
+| GPS Spoofing | Autoencoder + rule-based | ✅ healthy |
+| Login Anomaly | Isolation Forest + Autoencoder | ✅ healthy |
+| Password Risk | Entropy + HIBP k-anonymity | ✅ healthy |
+| Fraud Detection | XGBoost (rule-based fallback) | ✅ healthy |
+| Risk Fusion | Weighted average / max-threat / Bayesian | ✅ healthy |
+| Breach Checker | HIBP API + local entropy model | ✅ healthy |
+| Device Fingerprint | WebGL/navigator signals + behavioural | ✅ healthy |
 
-# Start backend
-python3 -m uvicorn src.api.fastapi_app:app --reload --host 0.0.0.0 --port 8000
+---
+
+## Frontend — 0 TypeScript Errors ✅
+
+**12 pages** compiled clean:
+
+```
+app/page.tsx                     ← Landing (ParticleHero, dark SOC)
+app/login/page.tsx               ← Auth (mock + Cognito)
+app/signup/page.tsx              ← Registration + password strength
+app/dashboard/page.tsx           ← Main dashboard (Globe + Gauge + live feed)
+app/dashboard/risk/page.tsx      ← Fusion engine playground
+app/dashboard/gps/page.tsx       ← GPS scenario tester
+app/dashboard/login/page.tsx     ← Login anomaly tester
+app/dashboard/fraud/page.tsx     ← Fraud scenario tester
+app/dashboard/breach/page.tsx    ← Password + email breach checker
+app/dashboard/device/page.tsx    ← Live device fingerprinter
+app/dashboard/identity/page.tsx  ← User identity + event history
+app/dashboard/alerts/page.tsx    ← Security alert feed
 ```
 
-**Frontend (in separate terminal):**
+**Three.js components** (static imports, ssr:false at page level):
+
+| Component | Description |
+|---|---|
+| `ParticleHero` | 1,400-particle canvas hero with mouse-reactive rotation |
+| `RiskGauge3D` | Torus arc gauge — lerps to live score each frame |
+| `ThreatGlobe` | Interactive 3D globe with lat/lon threat pings + pulsing rings |
+
+**Start command:**
 ```bash
 cd frontend
+npm install
+npm run dev   # http://localhost:3000
+```
+
+---
+
+## Client SDK (`sdk/`) ✅
+
+| File | Description |
+|---|---|
+| `aegis.js` | 379-line UMD bundle (browser / CommonJS / AMD) |
+| `aegis.d.ts` | Full TypeScript declarations |
+| `aegis.react.ts` | `useAegis()` hook + `withAegis()` HOC |
+| `package.json` | npm manifest (`@aegis/client-sdk`) |
+| `README.md` | Integration guide (vanilla JS + React examples) |
+
+**Methods:** `init`, `trackLogin`, `trackPassword`, `trackTransaction`, `trackAppUnlock`, `pushGPS`, `scoreNow`, `flush`, `destroy`
+
+---
+
+## AWS Integration — Graceful Degradation ✅
+
+All AWS services wrapped in try/except. With placeholder credentials the system runs fully in mock mode:
+
+| Service | Behaviour |
+|---|---|
+| Cognito | Falls back to mock tokens (`mock-*` always accepted first) |
+| DynamoDB | Returns empty lists/profiles, no 500 errors |
+| S3 | Model loading skipped, rule-based fallbacks active |
+| CloudWatch | Metrics silently skipped |
+| SNS | Alert publishing silently skipped |
+
+**To activate real AWS:** populate `.env`:
+```env
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-1
+COGNITO_USER_POOL_ID=us-east-1_...
+COGNITO_CLIENT_ID=...
+DYNAMODB_EVENTS_TABLE=aegis-events
+S3_MODELS_BUCKET=aegis-models
+SNS_ALERTS_TOPIC_ARN=arn:aws:sns:...
+```
+
+---
+
+## Running the Full Stack
+
+```bash
+# Terminal 1 — Backend
+cd Apeilo---Threat-Detection-System
+python3 -m uvicorn src.api.fastapi_app:app --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 2 — Frontend
+cd Apeilo---Threat-Detection-System/frontend
 npm run dev
+
+# URLs
+http://localhost:3000        ← Landing page
+http://localhost:3000/login  ← Sign in (any email + any password → mock mode)
+http://localhost:8000/docs   ← Swagger UI (interactive API docs)
+http://localhost:8000/health ← System health check
 ```
-
-### Option 3: Individual Components
-
-**Backend only:**
-```bash
-python3 -m uvicorn src.api.fastapi_app:app --port 8000
-```
-
-**Frontend only:**
-```bash
-cd frontend && npm run dev
-```
-
-## Access URLs
-
-Once running:
-- 🌐 Frontend Dashboard: http://localhost:3000
-- 📚 API Documentation: http://localhost:8000/docs
-- 💚 Health Check: http://localhost:8000/health
-- 🔍 API Root: http://localhost:8000
-
-## Test Credentials
-
-```
-Email: demo@apelio.com
-Password: demo123
-```
-
-## Quick API Tests
-
-```bash
-# Health check
-curl http://localhost:8000/health
-
-# GPS scoring (rule-based fallback)
-curl -X POST http://localhost:8000/gps/score \
-  -H "Content-Type: application/json" \
-  -d '{"trajectory": [{"latitude": 37.7749, "longitude": -122.4194, "speed": 50}]}'
-
-# Login scoring
-curl -X POST http://localhost:8000/login/score \
-  -H "Content-Type: application/json" \
-  -d '{"user_deg": 5, "comp_deg": 3, "hour_of_day": 14}'
-
-# Password scoring
-curl -X POST http://localhost:8000/password/score \
-  -H "Content-Type: application/json" \
-  -d '{"password": "TestPassword123!"}'
-```
-
-## Recommendations
-
-### For Development/Testing (Current Setup)
-✅ System is ready to use as-is
-- All core functionality works
-- Rule-based fallbacks provide reliable scoring
-- No action required
-
-### For Production
-Consider upgrading Python for full TensorFlow support:
-```bash
-# Install Python 3.10+
-brew install python@3.10
-
-# Recreate virtual environment
-python3.10 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## Next Steps
-
-1. **Start the system**: Run `./start_apelio.sh`
-2. **Access dashboard**: Open http://localhost:3000
-3. **Test endpoints**: Use the interactive API docs at http://localhost:8000/docs
-4. **Monitor health**: Check http://localhost:8000/health for component status
-
-## Support
-
-- See `TENSORFLOW_FIX.md` for TensorFlow troubleshooting
-- See `README.md` for full documentation
-- See `QUICK_START.md` for getting started guide

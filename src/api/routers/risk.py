@@ -4,9 +4,30 @@ Unified Risk Assessment API Router
 Endpoints for computing combined risk scores from all detection layers.
 """
 
+import time
+import os
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
+
+try:
+    from src.utils.aws_utils import (
+        dynamo_put_event,
+        cw_put_detection_metrics,
+        cw_put_alert_metric,
+        sns_alert_critical_risk,
+    )
+    _AWS_OK = True
+except Exception:
+    _AWS_OK = False
+    def dynamo_put_event(*a, **k): return None
+    def cw_put_detection_metrics(*a, **k): return None
+    def cw_put_alert_metric(*a, **k): return None
+    def sns_alert_critical_risk(*a, **k): return None
+
+CRITICAL_THRESHOLD = float(os.getenv("CRITICAL_RISK_THRESHOLD", "0.75"))
 
 router = APIRouter()
 
@@ -292,6 +313,53 @@ async def compute_unified_risk(request: UnifiedRiskRequest):
             fusion_strategy=request.fusion_strategy
         )
         
+        # ── AWS: persist event + emit metrics ────────────
+        _start_time = time.perf_counter()
+        uid = result.get("user_id") or request.user_id or "anonymous"
+        unified = result.get("unified_score", 0.0)
+
+        try:
+            dynamo_put_event(
+                user_id    = uid,
+                event_type = "unified_risk",
+                scores     = {
+                    "unified_score":  unified,
+                    "risk_level":     result.get("risk_level"),
+                    "gps_risk":       result.get("gps_risk", 0.0),
+                    "login_risk":     result.get("login_risk", 0.0),
+                    "password_risk":  result.get("password_risk", 0.0),
+                    "fraud_risk":     result.get("fraud_risk", 0.0),
+                    "primary_threats":result.get("primary_threats", []),
+                },
+            )
+        except Exception:
+            pass
+
+        try:
+            latency_ms = (time.perf_counter() - _start_time) * 1000
+            cw_put_detection_metrics(
+                module     = "fusion",
+                risk_score = unified,
+                latency_ms = latency_ms,
+                confidence = result.get("confidence", 0.7),
+            )
+            cw_put_alert_metric(result.get("risk_level", "unknown"))
+        except Exception:
+            pass
+
+        if unified >= CRITICAL_THRESHOLD:
+            try:
+                sns_alert_critical_risk(
+                    user_id             = uid,
+                    unified_score       = unified,
+                    primary_threats     = result.get("primary_threats", []),
+                    event_id            = result.get("event_id", ""),
+                    recommended_actions = result.get("recommended_actions", []),
+                )
+            except Exception:
+                pass
+        # ─────────────────────────────────────────────────
+
         return UnifiedRiskResponse(
             unified_score=result["unified_score"],
             risk_level=result["risk_level"],

@@ -1,23 +1,15 @@
-import "./globals.css";
-import { Inter } from "next/font/google";
 import type { Metadata } from "next";
-import type { ReactNode } from "react";
-
-const inter = Inter({ subsets: ["latin"] });
+import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Apelio",
-  description: "Apelio fraud and identity protection portal"
+  title: "Apeilo — Threat Detection",
+  description: "Multi-layer threat detection and identity management",
 };
 
-export default function RootLayout({
-  children
-}: {
-  children: ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body className={inter.className}>{children}</body>
+    <html lang="en" suppressHydrationWarning>
+      <body>{children}</body>
     </html>
   );
 }

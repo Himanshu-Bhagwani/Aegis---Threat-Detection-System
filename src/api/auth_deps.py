@@ -1,113 +1,223 @@
 """
-Authentication dependencies for protecting API routes.
+AEGIS Authentication Dependencies
+===================================
+FastAPI dependency injection for route protection.
 
-This module provides FastAPI dependencies for route protection.
-Currently uses mock token validation (for demo purposes).
-For production, replace with proper JWT/Firebase token validation.
+Primary path  → AWS Cognito access-token validation (get_user API call)
+Fallback path → Local JWT (python-jose) when Cognito is not configured
+Mock path     → Accepts any "mock-*" token for local development
+
+Usage in a router:
+    from src.api.auth_deps import require_auth, optional_auth
+
+    @router.post("/protected")
+    async def protected(user: dict = Depends(require_auth)):
+        return {"uid": user["user_sub"]}
 """
 
-from fastapi import Depends, HTTPException, Header
+import os
+import logging
 from typing import Optional
 
-# Store valid tokens (in production, use proper token validation)
-_valid_tokens: set[str] = set()
+from fastapi import Depends, HTTPException, Header, status
+from dotenv import load_dotenv
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "aegis-dev-secret-change-in-prod")
+JWT_ALGORITHM  = os.getenv("JWT_ALGORITHM",  "HS256")
 
 
-def get_token_from_header(authorization: Optional[str] = Header(None)) -> str:
-    """
-    Extract token from Authorization header.
-    
-    Expected format: "Bearer <token>"
-    """
+# ─────────────────────────────────────────────
+# Token extraction
+# ─────────────────────────────────────────────
+
+def _extract_token(authorization: Optional[str]) -> str:
+    """Pull the Bearer token out of the Authorization header."""
     if not authorization:
         raise HTTPException(
-            status_code=401,
-            detail="Authorization header missing. Please login first."
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    
     if not authorization.startswith("Bearer "):
         raise HTTPException(
-            status_code=401,
-            detail="Invalid authorization format. Expected 'Bearer <token>'"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization format. Expected: 'Bearer <token>'",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    token = authorization.replace("Bearer ", "").strip()
+    token = authorization[7:].strip()
     if not token:
         raise HTTPException(
-            status_code=401,
-            detail="Token is empty"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Bearer token is empty.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    
     return token
 
 
-def validate_mock_token(token: str) -> dict:
+# ─────────────────────────────────────────────
+# Cognito validation (primary)
+# ─────────────────────────────────────────────
+
+def _validate_via_cognito(token: str) -> Optional[dict]:
     """
-    Validate mock token (for demo purposes).
-    
-    In production, replace this with proper JWT validation
-    or Firebase token verification.
+    Validate token against AWS Cognito with get_user().
+    Returns user dict on success, None if Cognito is not configured.
+    Raises 401 HTTPException if token is actively invalid.
     """
-    # For mock auth, accept tokens that start with "mock-token-"
-    if token.startswith("mock-token-"):
-        # Extract user info from token or return default
+    try:
+        from src.utils.aws_utils import cognito_verify_token, COGNITO_USER_POOL_ID
+        if not COGNITO_USER_POOL_ID:
+            return None  # Cognito not configured — try fallback
+        result = cognito_verify_token(token)
+        if result.get("mock"):
+            return result
+        if not result.get("valid"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Invalid or expired token ({result.get('error', 'unknown')})",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Cognito validation error: %s", e)
+        return None
+
+
+# ─────────────────────────────────────────────
+# Local JWT validation (fallback)
+# ─────────────────────────────────────────────
+
+def _validate_via_local_jwt(token: str) -> Optional[dict]:
+    """Validate a locally-signed JWT (python-jose). Used when Cognito is not configured."""
+    try:
+        from jose import jwt
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         return {
-            "uid": "demo-user",
-            "email": "demo@apelio.com",
-            "token": token
+            "valid":    True,
+            "user_sub": payload.get("sub", "local-user"),
+            "email":    payload.get("email", ""),
+            "username": payload.get("email", ""),
         }
-    
-    # If you want stricter validation, check against _valid_tokens
-    # if token not in _valid_tokens:
-    #     raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────
+# Mock validation (development only)
+# ─────────────────────────────────────────────
+
+def _validate_mock(token: str) -> Optional[dict]:
+    """Accept mock-* tokens in development / when no auth is configured."""
+    if token.startswith("mock-"):
+        return {
+            "valid":    True,
+            "user_sub": "mock-user-001",
+            "email":    "demo@aegis.com",
+            "username": "demo@aegis.com",
+            "mock":     True,
+        }
+    return None
+
+
+# ─────────────────────────────────────────────
+# Core resolver
+# ─────────────────────────────────────────────
+
+def _resolve_user(token: str) -> dict:
+    """
+    Try auth methods in order:
+      1. Mock token  (development — checked FIRST so mock-* tokens always work
+                      even when Cognito env vars are set to placeholder values)
+      2. AWS Cognito (if credentials are valid/reachable)
+      3. Local JWT   (python-jose fallback)
+    """
+    # Check mock FIRST — prevents placeholder Cognito creds from blocking dev tokens
+    user = _validate_mock(token)
+    if user:
+        return user
+
+    user = _validate_via_cognito(token)
+    if user:
+        return user
+
+    user = _validate_via_local_jwt(token)
+    if user:
+        return user
+
     raise HTTPException(
-        status_code=401,
-        detail="Invalid authentication token. Please login again."
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials.",
+        headers={"WWW-Authenticate": "Bearer"},
     )
 
 
+# ─────────────────────────────────────────────
+# Public dependency functions
+# ─────────────────────────────────────────────
+
 def require_auth(authorization: Optional[str] = Header(None)) -> dict:
     """
-    FastAPI dependency for protecting routes.
-    
-    Usage:
-        @router.post("/protected")
-        async def protected_route(user: dict = Depends(require_auth)):
-            return {"message": f"Hello {user['email']}"}
+    FastAPI dependency — requires a valid token.
+    Returns user dict: { valid, user_sub, email, username, [mock] }
     """
-    token = get_token_from_header(authorization)
-    user = validate_mock_token(token)
-    return user
+    token = _extract_token(authorization)
+    return _resolve_user(token)
 
 
 def optional_auth(authorization: Optional[str] = Header(None)) -> Optional[dict]:
     """
-    FastAPI dependency for optional authentication.
-    
+    FastAPI dependency — token is optional.
     Returns user dict if authenticated, None otherwise.
-    Useful for endpoints that have different behavior for authenticated vs anonymous users.
-    
-    Usage:
-        @router.get("/public")
-        async def public_route(user: Optional[dict] = Depends(optional_auth)):
-            if user:
-                return {"message": f"Hello {user['email']}"}
-            return {"message": "Hello anonymous user"}
     """
+    if not authorization:
+        return None
     try:
-        token = get_token_from_header(authorization)
-        return validate_mock_token(token)
+        token = _extract_token(authorization)
+        return _resolve_user(token)
     except HTTPException:
         return None
 
 
+# ─────────────────────────────────────────────
+# Local JWT creation (for /login fallback)
+# ─────────────────────────────────────────────
+
+def create_local_jwt(user_sub: str, email: str, expires_minutes: int = 60) -> str:
+    """Create a local JWT for use when Cognito is not configured."""
+    from datetime import datetime, timedelta, timezone
+    try:
+        from jose import jwt
+        now     = datetime.now(timezone.utc)
+        payload = {
+            "sub":   user_sub,
+            "email": email,
+            "iat":   now,
+            "exp":   now + timedelta(minutes=expires_minutes),
+        }
+        return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    except ImportError:
+        import uuid
+        return f"mock-{uuid.uuid4().hex}"
+
+
+# ─────────────────────────────────────────────
+# Legacy shims (keep existing call sites working)
+# ─────────────────────────────────────────────
+_valid_tokens: set = set()
+
+def get_token_from_header(authorization: Optional[str] = Header(None)) -> str:
+    return _extract_token(authorization)
+
+def validate_mock_token(token: str) -> dict:
+    return _resolve_user(token)
+
 def add_valid_token(token: str):
-    """Add a token to the valid tokens set (for testing/strict validation)"""
     _valid_tokens.add(token)
 
-
 def remove_valid_token(token: str):
-    """Remove a token from valid tokens (logout)"""
     _valid_tokens.discard(token)
-

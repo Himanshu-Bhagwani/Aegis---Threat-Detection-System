@@ -2,144 +2,171 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { login } from "@/lib/api";
-import { setAuthToken } from "@/lib/auth";
+import Link from "next/link";
 
-const STORY_LINES = [
-  "Live breach telemetry. Automatically triaged.",
-  "Machine learning signals that evolve with every identity.",
-  "Privacy hardened through zero-knowledge monitoring."
-];
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("");
+  const [email,    setEmail]    = useState("");
   const [password, setPassword] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [isNarrativeActive, setIsNarrativeActive] = useState(false);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState<string | null>(null);
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
     setError(null);
-    setSuccessMessage(null);
-    setIsLoading(true);
 
     try {
-      const response = await login({ email, password });
-      setAuthToken(response.idToken);
-      setSuccessMessage("Securely signed in. Redirecting...");
-      setTimeout(() => router.push("/dashboard"), 1500);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to log in");
+      const res = await fetch(`${API}/auth/signin`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.detail ?? "Sign-in failed");
+        return;
+      }
+
+      const token = data.access_token ?? data.token;
+      if (token) {
+        localStorage.setItem("aegis_token", token);
+        localStorage.setItem("aegis_user",  JSON.stringify({ email, user_sub: data.user_sub ?? email }));
+      }
+      router.push("/dashboard");
+    } catch {
+      setError("Could not reach the server. Is the API running?");
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   }
 
+  function useMockLogin() {
+    localStorage.setItem("aegis_token", "mock-dev-token-001");
+    localStorage.setItem("aegis_user",  JSON.stringify({ email: "demo@apeilo.com", user_sub: "mock-user-001" }));
+    router.push("/dashboard");
+  }
+
   return (
-    <main className="auth-shell">
-      <section className="auth-panel">
-        <span className="auth-brand">Aegis - Fraud &amp; Identity Protection</span>
-        <div>
-          <h1>Welcome back, Guardian</h1>
-          <p className="auth-subtitle">
-            Authenticate to review live identity signals and close incidents with confidence.
-          </p>
+    <div style={{
+      minHeight: "100vh", background: "var(--bg-base)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      padding: 24, position: "relative", overflow: "hidden",
+    }}>
+      {/* Background glow */}
+      <div style={{
+        position: "absolute", width: 600, height: 600,
+        borderRadius: "50%", top: "50%", left: "50%",
+        transform: "translate(-50%, -50%)",
+        background: "radial-gradient(circle, rgba(61,127,255,0.06) 0%, transparent 70%)",
+        pointerEvents: "none",
+      }} />
+
+      <div style={{ width: "100%", maxWidth: 400, position: "relative", animation: "fadeUp 0.5s ease" }}>
+
+        {/* Logo */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 36 }}>
+          <div style={{
+            width: 36, height: 36, borderRadius: 10,
+            background: "var(--accent)", display: "flex",
+            alignItems: "center", justifyContent: "center",
+            fontSize: 18, fontWeight: 800, color: "#fff",
+          }}>Æ</div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>Apeilo</div>
+            <div style={{ fontSize: 10, color: "var(--text-disabled)", textTransform: "uppercase",
+              letterSpacing: "0.08em" }}>Threat Detection</div>
+          </div>
         </div>
 
-        <form className="auth-form" onSubmit={handleSubmit}>
-          <label className="auth-label">
-            Email
+        <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.025em",
+          color: "var(--text-primary)", marginBottom: 6 }}>
+          Sign in
+        </h1>
+        <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 28 }}>
+          Access your threat intelligence dashboard.
+        </p>
+
+        <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <label style={{ display: "block", fontSize: 11, color: "var(--text-muted)",
+              textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>
+              Email
+            </label>
             <input
-              className="auth-input"
               type="email"
-              required
+              className="input"
               value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="you@aegis-secure.com"
-              autoComplete="email"
-            />
-          </label>
-
-          <label className="auth-label">
-            Password
-            <input
-              className="auth-input"
-              type="password"
+              onChange={e => setEmail(e.target.value)}
+              placeholder="you@company.com"
               required
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="Enter your passphrase"
-              autoComplete="current-password"
+              style={{ width: "100%" }}
             />
-          </label>
+          </div>
 
-          {error && <p className="auth-error">{error}</p>}
-          {successMessage && <p className="auth-success">{successMessage}</p>}
+          <div>
+            <label style={{ display: "block", fontSize: 11, color: "var(--text-muted)",
+              textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>
+              Password
+            </label>
+            <input
+              type="password"
+              className="input"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••"
+              required
+              style={{ width: "100%" }}
+            />
+          </div>
+
+          {error && (
+            <div style={{
+              padding: "10px 14px", borderRadius: 8, fontSize: 13,
+              background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.20)",
+              color: "var(--risk-critical)",
+            }}>
+              {error}
+            </div>
+          )}
 
           <button
-            className="auth-submit"
             type="submit"
-            disabled={isLoading}
-            onMouseEnter={() => setIsNarrativeActive(true)}
-            onMouseLeave={() => setIsNarrativeActive(false)}
-            onFocus={() => setIsNarrativeActive(true)}
-            onBlur={() => setIsNarrativeActive(false)}
+            className="btn-primary"
+            disabled={loading}
+            style={{ marginTop: 4, fontSize: 14, padding: "12px 0" }}
           >
-            {isLoading ? "Securing session..." : "Sign in"}
+            {loading ? "Signing in…" : "Sign in →"}
           </button>
         </form>
 
-        <p className="auth-footer">
-          New to Aegis?{" "}
-          <a href="/signup" className="auth-link">
-            Create your shield
-          </a>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10,
+          margin: "20px 0", color: "var(--text-disabled)", fontSize: 12,
+        }}>
+          <div style={{ flex: 1, height: 1, background: "var(--border-subtle)" }} />
+          or
+          <div style={{ flex: 1, height: 1, background: "var(--border-subtle)" }} />
+        </div>
+
+        <button
+          onClick={useMockLogin}
+          className="btn-ghost"
+          style={{ width: "100%", fontSize: 13, padding: "10px 0" }}
+        >
+          Continue with mock token (dev mode)
+        </button>
+
+        <p style={{ textAlign: "center", marginTop: 24, fontSize: 13, color: "var(--text-secondary)" }}>
+          No account?{" "}
+          <Link href="/signup" style={{ color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>
+            Sign up free
+          </Link>
         </p>
-      </section>
-
-      <aside
-        className={`auth-hero auth-hero--network${isNarrativeActive ? " is-active" : ""}`}
-      >
-        <div className="network-stage" aria-hidden="true">
-          <span className="network-core" />
-          <span className="network-ring ring-a" />
-          <span className="network-ring ring-b" />
-          <span className="network-ring ring-c" />
-          <span className="network-node node-1" />
-          <span className="network-node node-2" />
-          <span className="network-node node-3" />
-          <span className="network-node node-4" />
-        </div>
-
-        <div className="auth-hero-content auth-hero-content--glass">
-          <span className="auth-hero-kicker">Adaptive Defense</span>
-          <h2>Your identity intelligence hub</h2>
-          <p>
-            Layered anomaly detection, breach telemetry, and{" "}
-            <span className="auth-highlight">real-time AWS insights</span> keep your
-            organisation ahead of sophisticated threat actors.
-          </p>
-          <span className="auth-hero-cta">Explore fraud analytics briefing</span>
-          <span className="auth-hero-footnote">
-            Backed by AWS Observability + ML Defense Stack
-          </span>
-        </div>
-
-        <div className="story-lines" aria-hidden="true">
-          {STORY_LINES.map((line, index) => (
-            <span
-              key={line}
-              className="story-line"
-              style={{ transitionDelay: `${120 + index * 160}ms` }}
-            >
-              {line}
-            </span>
-          ))}
-        </div>
-      </aside>
-    </main>
+      </div>
+    </div>
   );
 }

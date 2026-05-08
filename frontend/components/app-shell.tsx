@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 
 import { Navigation } from "@/components/navigation";
-import { Sidebar } from "@/components/sidebar";
+import Sidebar from "@/components/sidebar";
 
 type AppShellProps = {
   children: ReactNode;
