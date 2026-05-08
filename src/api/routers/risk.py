@@ -8,7 +8,7 @@ import time
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
 
@@ -86,6 +86,16 @@ class UnifiedRiskRequest(BaseModel):
     password_score: Optional[float] = Field(None, ge=0, le=1, description="Pre-computed password risk score")
     transaction_data: Optional[TransactionData] = Field(None, description="Transaction data or pre-computed fraud score")
     
+    # Pre-computed scores from other detection modules
+    breach_data: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Pre-computed breach score dict from /breach/check/password (e.g. {breach_probability, confidence})"
+    )
+    device_data: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Pre-computed device risk dict from /device/score (e.g. {device_risk_score, confidence})"
+    )
+
     # Fusion options
     fusion_strategy: str = Field(
         "weighted_average",
@@ -128,6 +138,8 @@ class UnifiedRiskResponse(BaseModel):
     login_risk: float = Field(..., ge=0, le=1)
     password_risk: float = Field(..., ge=0, le=1)
     fraud_risk: float = Field(..., ge=0, le=1)
+    breach_risk: float = Field(0.0, ge=0, le=1, description="Breach exposure risk score")
+    device_risk: float = Field(0.0, ge=0, le=1, description="Device fingerprint risk score")
     
     # Threat analysis
     primary_threats: List[str] = Field(..., description="Top threat categories identified")
@@ -215,7 +227,7 @@ def get_fraud_scorer():
 
 
 @router.post("/unified", response_model=UnifiedRiskResponse, summary="Compute unified risk score")
-async def compute_unified_risk(request: UnifiedRiskRequest):
+async def compute_unified_risk(body: UnifiedRiskRequest, request: Request):
     """
     Compute a unified risk score combining all threat detection layers.
     
@@ -242,80 +254,78 @@ async def compute_unified_risk(request: UnifiedRiskRequest):
         
         # Prepare GPS score
         gps_score = None
-        if request.gps_data:
-            if request.gps_data.spoof_probability is not None:
-                # Use pre-computed score
+        if body.gps_data:
+            if body.gps_data.spoof_probability is not None:
                 gps_score = {
-                    "spoof_probability": request.gps_data.spoof_probability,
-                    "confidence": request.gps_data.confidence or 0.7,
+                    "spoof_probability": body.gps_data.spoof_probability,
+                    "confidence": body.gps_data.confidence or 0.7,
                     "models_used": ["pre_computed"]
                 }
-            elif request.gps_data.trajectory:
-                # Score the trajectory
+            elif body.gps_data.trajectory:
                 try:
                     gps_scorer = get_gps_scorer()
-                    gps_score = gps_scorer(request.gps_data.trajectory)
+                    gps_score = gps_scorer(body.gps_data.trajectory)
                 except Exception as e:
                     gps_score = {"spoof_probability": 0.0, "confidence": 0.0, "error": str(e)}
-        
+
         # Prepare login score
         login_score = None
-        if request.login_data:
-            if request.login_data.anomaly_probability is not None:
-                # Use pre-computed score
+        if body.login_data:
+            if body.login_data.anomaly_probability is not None:
                 login_score = {
-                    "anomaly_probability": request.login_data.anomaly_probability,
-                    "confidence": request.login_data.confidence or 0.7,
+                    "anomaly_probability": body.login_data.anomaly_probability,
+                    "confidence": body.login_data.confidence or 0.7,
                     "models_used": ["pre_computed"]
                 }
             else:
-                # Score the login event
                 try:
                     login_scorer = get_login_scorer()
-                    login_dict = request.login_data.model_dump(
+                    login_dict = body.login_data.model_dump(
                         exclude={"anomaly_probability", "confidence"}
                     )
                     login_score = login_scorer(login_dict)
                 except Exception as e:
                     login_score = {"anomaly_probability": 0.0, "confidence": 0.0, "error": str(e)}
-        
+
         # Prepare password score
         password_risk = None
-        if request.password_score is not None:
-            password_risk = request.password_score
-        elif request.password:
+        if body.password_score is not None:
+            password_risk = body.password_score
+        elif body.password:
             try:
                 password_scorer = get_password_scorer()
-                password_risk = password_scorer(request.password)
+                password_risk = password_scorer(body.password)
             except Exception:
                 password_risk = None
-        
+
         # Prepare fraud score
         fraud_risk = None
-        if request.transaction_data:
-            if request.transaction_data.fraud_probability is not None:
-                fraud_risk = request.transaction_data.fraud_probability
-            elif request.transaction_data.payload:
+        if body.transaction_data:
+            if body.transaction_data.fraud_probability is not None:
+                fraud_risk = body.transaction_data.fraud_probability
+            elif body.transaction_data.payload:
                 try:
                     fraud_scorer = get_fraud_scorer()
-                    fraud_risk = fraud_scorer(request.transaction_data.payload)
+                    fraud_risk = fraud_scorer(body.transaction_data.payload)
                 except Exception:
                     fraud_risk = None
-        
-        # Compute unified risk
+
+        # Compute unified risk (now includes breach + device)
         result = fusion_fn(
             gps_score=gps_score,
             login_score=login_score,
             password_score=password_risk,
             fraud_score=fraud_risk,
-            user_id=request.user_id,
-            event_id=request.event_id,
-            fusion_strategy=request.fusion_strategy
+            breach_score=body.breach_data,
+            device_score=body.device_data,
+            user_id=body.user_id,
+            event_id=body.event_id,
+            fusion_strategy=body.fusion_strategy
         )
-        
+
         # ── AWS: persist event + emit metrics ────────────
         _start_time = time.perf_counter()
-        uid = result.get("user_id") or request.user_id or "anonymous"
+        uid     = result.get("user_id") or body.user_id or "anonymous"
         unified = result.get("unified_score", 0.0)
 
         try:
@@ -329,6 +339,8 @@ async def compute_unified_risk(request: UnifiedRiskRequest):
                     "login_risk":     result.get("login_risk", 0.0),
                     "password_risk":  result.get("password_risk", 0.0),
                     "fraud_risk":     result.get("fraud_risk", 0.0),
+                    "breach_risk":    result.get("breach_risk", 0.0),
+                    "device_risk":    result.get("device_risk", 0.0),
                     "primary_threats":result.get("primary_threats", []),
                 },
             )
@@ -358,6 +370,14 @@ async def compute_unified_risk(request: UnifiedRiskRequest):
                 )
             except Exception:
                 pass
+
+        # ── WebSocket broadcast ───────────────────────────
+        try:
+            broadcast = getattr(request.app.state, "broadcast", None)
+            if broadcast:
+                await broadcast("unified_risk", uid, result)
+        except Exception:
+            pass
         # ─────────────────────────────────────────────────
 
         return UnifiedRiskResponse(
@@ -368,6 +388,8 @@ async def compute_unified_risk(request: UnifiedRiskRequest):
             login_risk=result["login_risk"],
             password_risk=result["password_risk"],
             fraud_risk=result["fraud_risk"],
+            breach_risk=result.get("breach_risk", 0.0),
+            device_risk=result.get("device_risk", 0.0),
             primary_threats=result["primary_threats"],
             threat_signals=result["threat_signals"],
             recommended_actions=result["recommended_actions"],
@@ -442,7 +464,9 @@ async def get_thresholds():
             "gps_spoofing": 1.5,
             "login_anomaly": 2.0,
             "password_weakness": 1.0,
-            "transaction_fraud": 2.5
+            "transaction_fraud": 2.5,
+            "breach_exposure": 1.8,
+            "device_risk": 1.2,
         },
         "fusion_strategies_available": ["weighted_average", "max_threat", "bayesian"]
     }

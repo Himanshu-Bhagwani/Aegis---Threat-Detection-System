@@ -93,10 +93,13 @@ function toBackendGPSPoints(trajectory: GPSPoint[]) {
     time_delta: 0,
   }));
 }
-export async function scoreGPS(trajectory: GPSPoint[]) {
+export async function scoreGPS(trajectory: GPSPoint[], userId?: string) {
   return apiFetch("/gps/score", {
     method: "POST",
-    body: JSON.stringify({ trajectory: toBackendGPSPoints(trajectory) }),
+    body: JSON.stringify({
+      trajectory: toBackendGPSPoints(trajectory),
+      ...(userId ? { user_id: userId } : {}),
+    }),
   });
 }
 

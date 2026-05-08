@@ -27,6 +27,8 @@ class ThreatCategory(str, Enum):
     TRANSACTION_FRAUD = "transaction_fraud"
     ACCOUNT_TAKEOVER = "account_takeover"
     IDENTITY_THEFT = "identity_theft"
+    BREACH_EXPOSURE = "breach_exposure"
+    DEVICE_RISK = "device_risk"
 
 
 class RiskLevel(str, Enum):
@@ -65,6 +67,8 @@ class UnifiedRiskScore:
     login_risk: float
     password_risk: float
     fraud_risk: float
+    breach_risk: float
+    device_risk: float
     
     # Detailed breakdown
     threat_signals: List[Dict]
@@ -106,6 +110,8 @@ class RiskFusionEngine:
         ThreatCategory.TRANSACTION_FRAUD: 2.5,
         ThreatCategory.ACCOUNT_TAKEOVER: 3.0,
         ThreatCategory.IDENTITY_THEFT: 2.5,
+        ThreatCategory.BREACH_EXPOSURE: 1.8,
+        ThreatCategory.DEVICE_RISK: 1.2,
     }
     
     # Risk level thresholds
@@ -231,6 +237,18 @@ class RiskFusionEngine:
                 elif signal.probability >= 0.5:
                     recommendations.append("Flag transaction for manual review before processing.")
                     recommendations.append("Consider requiring additional verification (OTP, biometric).")
+
+            elif signal.category == ThreatCategory.BREACH_EXPOSURE:
+                if signal.probability >= 0.7:
+                    recommendations.append("CRITICAL: Credentials found in breach database. Force immediate password reset and enable MFA.")
+                elif signal.probability >= 0.4:
+                    recommendations.append("Password detected in breach database. Prompt user to update credentials.")
+
+            elif signal.category == ThreatCategory.DEVICE_RISK:
+                if signal.probability >= 0.7:
+                    recommendations.append("CRITICAL: High-risk device detected (new/emulator/rooted). Require step-up authentication.")
+                elif signal.probability >= 0.4:
+                    recommendations.append("Unrecognized or risky device detected. Request additional verification.")
         
         # General recommendations based on overall risk
         if unified_score >= 0.9:
@@ -255,22 +273,26 @@ class RiskFusionEngine:
         login_score: Optional[Dict] = None,
         password_score: Optional[float] = None,
         fraud_score: Optional[float] = None,
+        breach_score: Optional[Dict] = None,
+        device_score: Optional[Dict] = None,
         user_id: str = None,
         event_id: str = None,
         fusion_strategy: str = "weighted_average"
     ) -> UnifiedRiskScore:
         """
         Compute unified risk score from all detection modules.
-        
+
         Args:
-            gps_score: Output from GPS spoofing detection (dict with spoof_probability, confidence)
-            login_score: Output from login anomaly detection (dict with anomaly_probability, confidence)
+            gps_score:     Output from GPS spoofing detection (dict with spoof_probability, confidence)
+            login_score:   Output from login anomaly detection (dict with anomaly_probability, confidence)
             password_score: Password weakness/breach probability (float 0-1)
-            fraud_score: Transaction fraud probability (float 0-1)
-            user_id: Optional user identifier
-            event_id: Optional event identifier
+            fraud_score:   Transaction fraud probability (float 0-1)
+            breach_score:  Output from HIBP breach check (dict with breach_probability, confidence)
+            device_score:  Output from device fingerprint scoring (dict with device_risk_score, confidence)
+            user_id:       Optional user identifier
+            event_id:      Optional event identifier
             fusion_strategy: "weighted_average", "max_threat", or "bayesian"
-            
+
         Returns:
             UnifiedRiskScore object with complete risk assessment
         """
@@ -328,11 +350,43 @@ class RiskFusionEngine:
             signals.append(ThreatSignal(
                 category=ThreatCategory.TRANSACTION_FRAUD,
                 probability=fraud_prob,
-                confidence=0.85,  # XGBoost model confidence
+                confidence=0.85,
                 source_model="fraud_xgb"
             ))
             models_used.append("fraud_xgb")
-        
+
+        # Process breach score
+        breach_prob = 0.0
+        if breach_score is not None:
+            breach_prob = self._normalize_probability(breach_score.get("breach_probability", 0.0))
+            signals.append(ThreatSignal(
+                category=ThreatCategory.BREACH_EXPOSURE,
+                probability=breach_prob,
+                confidence=breach_score.get("confidence", 0.9),
+                source_model="hibp_k_anonymity",
+                details={
+                    "is_pwned":    breach_score.get("is_pwned", False),
+                    "breach_count": breach_score.get("breach_count", 0),
+                }
+            ))
+            models_used.append("hibp")
+
+        # Process device score
+        device_prob = 0.0
+        if device_score is not None:
+            device_prob = self._normalize_probability(device_score.get("device_risk_score", 0.0))
+            signals.append(ThreatSignal(
+                category=ThreatCategory.DEVICE_RISK,
+                probability=device_prob,
+                confidence=device_score.get("confidence", 0.85),
+                source_model="device_fingerprint",
+                details={
+                    "is_new_device": device_score.get("is_new_device", False),
+                    "signals":       device_score.get("signals", []),
+                }
+            ))
+            models_used.append("device_fingerprint")
+
         # Apply fusion strategy
         if fusion_strategy == "max_threat":
             unified = self._max_threat_fusion(signals)
@@ -366,6 +420,8 @@ class RiskFusionEngine:
             login_risk=float(login_prob),
             password_risk=float(password_prob),
             fraud_risk=float(fraud_prob),
+            breach_risk=float(breach_prob),
+            device_risk=float(device_prob),
             threat_signals=[asdict(s) for s in signals],
             primary_threats=primary_threats,
             recommended_actions=recommendations,
@@ -390,13 +446,15 @@ def compute_unified_risk(
     login_score: Optional[Dict] = None,
     password_score: Optional[float] = None,
     fraud_score: Optional[float] = None,
+    breach_score: Optional[Dict] = None,
+    device_score: Optional[Dict] = None,
     user_id: str = None,
     event_id: str = None,
     fusion_strategy: str = "weighted_average"
 ) -> Dict:
     """
     Convenience function to compute unified risk score.
-    
+
     Returns dictionary (JSON-serializable) with full risk assessment.
     """
     engine = get_fusion_engine()
@@ -405,6 +463,8 @@ def compute_unified_risk(
         login_score=login_score,
         password_score=password_score,
         fraud_score=fraud_score,
+        breach_score=breach_score,
+        device_score=device_score,
         user_id=user_id,
         event_id=event_id,
         fusion_strategy=fusion_strategy

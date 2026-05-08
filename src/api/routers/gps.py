@@ -1,201 +1,228 @@
 """
 GPS Spoofing Detection API Router
 
-Endpoints for detecting GPS spoofing from trajectory data.
+Endpoints:
+  POST /gps/score        - Score a full GPS trajectory
+  POST /gps/score/point  - Score a single GPS point (limited accuracy)
+  GET  /gps/health       - Module health check
 """
 
-from fastapi import APIRouter, HTTPException
+import time
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional, Any
+
+from src.utils.aws_utils import dynamo_put_event, cw_put_detection_metrics
 
 router = APIRouter()
 
 
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
 class GPSPoint(BaseModel):
-    """Single GPS data point."""
-    latitude: float = Field(..., ge=-90, le=90, description="Latitude in degrees")
-    longitude: float = Field(..., ge=-180, le=180, description="Longitude in degrees")
-    speed: Optional[float] = Field(0.0, ge=0, description="Speed in m/s")
-    acceleration: Optional[float] = Field(0.0, description="Acceleration in m/s²")
-    heading: Optional[float] = Field(0.0, ge=0, le=360, description="Heading in degrees")
-    heading_change: Optional[float] = Field(0.0, description="Change in heading")
-    timestamp: Optional[float] = Field(None, description="Unix timestamp")
-    time_delta: Optional[float] = Field(0.0, ge=0, description="Time since last point in seconds")
-    
+    latitude:      float           = Field(..., ge=-90, le=90)
+    longitude:     float           = Field(..., ge=-180, le=180)
+    speed:         Optional[float] = Field(0.0, ge=0)
+    acceleration:  Optional[float] = Field(0.0)
+    heading:       Optional[float] = Field(0.0, ge=0, le=360)
+    heading_change: Optional[float] = Field(0.0)
+    timestamp:     Optional[float] = Field(None, description="Unix timestamp (seconds)")
+    time_delta:    Optional[float] = Field(0.0, ge=0)
+
     class Config:
         json_schema_extra = {
             "example": {
-                "latitude": 37.7749,
-                "longitude": -122.4194,
-                "speed": 15.5,
-                "heading": 45.0,
-                "timestamp": 1701234567.0
+                "latitude": 37.7749, "longitude": -122.4194,
+                "speed": 15.5, "heading": 45.0,
+                "timestamp": 1_700_000_000.0,
             }
         }
 
 
 class GPSTrajectoryRequest(BaseModel):
-    """Request body for GPS trajectory scoring."""
-    trajectory: List[GPSPoint] = Field(..., min_length=1, description="List of GPS points forming a trajectory")
-    user_id: Optional[str] = Field(None, description="Optional user identifier")
-    device_id: Optional[str] = Field(None, description="Optional device identifier")
-    ensemble: bool = Field(True, description="Whether to use ensemble of all models")
-    
+    trajectory: List[GPSPoint] = Field(..., min_length=1)
+    user_id:    Optional[str]  = Field(None)
+    device_id:  Optional[str]  = Field(None)
+    ensemble:   bool           = Field(True)
+
     class Config:
         json_schema_extra = {
             "example": {
                 "trajectory": [
-                    {"latitude": 37.7749, "longitude": -122.4194, "speed": 0, "heading": 0},
-                    {"latitude": 37.7750, "longitude": -122.4195, "speed": 5, "heading": 45},
-                    {"latitude": 37.7751, "longitude": -122.4196, "speed": 10, "heading": 45}
+                    {"latitude": 37.7749, "longitude": -122.4194,
+                     "timestamp": 1_700_000_000.0, "speed": 0},
+                    {"latitude": 37.7750, "longitude": -122.4195,
+                     "timestamp": 1_700_000_010.0, "speed": 1.2},
+                    {"latitude": 37.7751, "longitude": -122.4196,
+                     "timestamp": 1_700_000_020.0, "speed": 1.8},
                 ],
                 "user_id": "user_12345",
-                "ensemble": True
+                "ensemble": True,
             }
         }
 
 
 class SinglePointRequest(BaseModel):
-    """Request body for single GPS point scoring."""
-    latitude: float = Field(..., ge=-90, le=90)
-    longitude: float = Field(..., ge=-180, le=180)
-    speed: Optional[float] = Field(0.0, ge=0)
-    heading: Optional[float] = Field(0.0, ge=0, le=360)
-    prev_latitude: Optional[float] = Field(None, ge=-90, le=90)
+    latitude:      float          = Field(..., ge=-90,  le=90)
+    longitude:     float          = Field(..., ge=-180, le=180)
+    speed:         Optional[float] = Field(0.0, ge=0)
+    heading:       Optional[float] = Field(0.0, ge=0, le=360)
+    prev_latitude: Optional[float] = Field(None, ge=-90,  le=90)
     prev_longitude: Optional[float] = Field(None, ge=-180, le=180)
 
 
 class GPSSpoofResponse(BaseModel):
-    """Response from GPS spoofing detection."""
-    spoof_probability: float = Field(..., ge=0, le=1, description="Probability that the trajectory is spoofed")
-    is_spoofed: bool = Field(..., description="Binary classification result")
-    confidence: float = Field(..., ge=0, le=1, description="Confidence in the prediction")
-    model_scores: Dict[str, float] = Field(..., description="Individual model scores")
-    models_used: List[str] = Field(..., description="List of models used in scoring")
-    user_id: Optional[str] = None
-    device_id: Optional[str] = None
+    spoof_probability: float            = Field(..., ge=0, le=1)
+    risk_score:        float            = Field(..., ge=0, le=1,
+                                              description="Alias for spoof_probability")
+    is_spoofed:        bool
+    confidence:        float            = Field(..., ge=0, le=1)
+    model_scores:      Dict[str, float]
+    models_used:       List[str]
+    risk_factors:      List[str]        = Field(default_factory=list,
+                                              description="Triggered rule descriptions")
+    user_id:           Optional[str]    = None
+    device_id:         Optional[str]    = None
+    timestamp:         Optional[str]    = None
+    latency_ms:        Optional[float]  = None
 
 
-# Lazy import to avoid circular imports and slow startup
-_score_gps = None
+# ── Lazy imports ──────────────────────────────────────────────────────────────
 
-def get_score_function():
-    global _score_gps
-    if _score_gps is None:
+_scorer = None
+
+def _get_scorer():
+    global _scorer
+    if _scorer is None:
         from src.gps.score_gps import score_gps_trajectory, score_single_point
-        _score_gps = {
-            "trajectory": score_gps_trajectory,
-            "single": score_single_point
-        }
-    return _score_gps
+        _scorer = {"trajectory": score_gps_trajectory, "single": score_single_point}
+    return _scorer
 
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/score", response_model=GPSSpoofResponse, summary="Score GPS trajectory for spoofing")
-async def score_trajectory(request: GPSTrajectoryRequest):
+async def score_trajectory(body: GPSTrajectoryRequest, request: Request):
     """
-    Analyze a GPS trajectory for potential spoofing.
-    
-    The endpoint uses multiple ML models to detect anomalies:
-    - Isolation Forest (unsupervised anomaly detection)
-    - Gradient Boosting (supervised classification)
-    - Autoencoder (reconstruction error)
-    - CNN-RNN (deep learning on sequences)
-    
-    Returns a probability score [0-1] where higher values indicate 
-    higher likelihood of GPS spoofing.
+    Analyse a GPS trajectory for spoofing using an ensemble of:
+    - Rule-based physics checks (always active)
+    - Isolation Forest
+    - Gradient Boosting (GBM)
+    - Autoencoder reconstruction error
+    - 1D-CNN + BiLSTM
+
+    Returns a spoof probability [0-1] and which rules / models triggered.
     """
+    start = time.perf_counter()
     try:
-        score_fn = get_score_function()
-        
-        # Convert Pydantic models to dicts
-        trajectory_dicts = [point.model_dump() for point in request.trajectory]
-        
-        # Score the trajectory
-        result = score_fn["trajectory"](trajectory_dicts, ensemble=request.ensemble)
-        
-        return GPSSpoofResponse(
-            spoof_probability=result["spoof_probability"],
-            is_spoofed=result["is_spoofed"],
-            confidence=result["confidence"],
-            model_scores=result["model_scores"],
-            models_used=result.get("models_used", []),
-            user_id=request.user_id,
-            device_id=request.device_id
-        )
-        
-    except FileNotFoundError as e:
-        raise HTTPException(
-            status_code=503, 
-            detail=f"GPS spoofing models not available: {str(e)}"
-        )
+        scorer = _get_scorer()
+        trajectory_dicts = [p.model_dump() for p in body.trajectory]
+        result = scorer["trajectory"](trajectory_dicts, ensemble=body.ensemble)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Scoring error: {e}")
 
+    elapsed_ms = (time.perf_counter() - start) * 1_000
+    uid = body.user_id or "anonymous"
 
-@router.post("/score/point", summary="Score single GPS point (limited accuracy)")
-async def score_single(request: SinglePointRequest):
-    """
-    Quick scoring for a single GPS point.
-    
-    Note: Trajectory-based scoring is more accurate. Use this endpoint 
-    only when full trajectory data is not available.
-    """
+    # ── Persist + metrics ─────────────────────────────────
     try:
-        score_fn = get_score_function()
-        
-        result = score_fn["single"](
-            lat=request.latitude,
-            lng=request.longitude,
-            speed=request.speed or 0.0,
-            heading=request.heading or 0.0,
-            prev_lat=request.prev_latitude,
-            prev_lng=request.prev_longitude
+        cw_put_detection_metrics(
+            module     = "gps",
+            risk_score = result["spoof_probability"],
+            latency_ms = elapsed_ms,
+            confidence = result["confidence"],
         )
-        
-        return {
-            "spoof_probability": result["spoof_probability"],
-            "is_spoofed": result["is_spoofed"],
-            "confidence": result["confidence"],
-            "warning": "Single-point scoring has limited accuracy. Use trajectory scoring for better results."
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error scoring point: {str(e)}")
+    except Exception:
+        pass
 
-
-@router.get("/health", summary="Check GPS scoring service health")
-async def health_check():
-    """Check if GPS scoring models are loaded and ready."""
-    try:
-        score_fn = get_score_function()
-        
-        # Try loading models
-        models_available = []
-        models_missing = []
-        
-        # Test with minimal trajectory
-        test_trajectory = [
-            {"latitude": 0, "longitude": 0, "speed": 0, "heading": 0}
-        ]
-        
+    if body.user_id:
         try:
-            result = score_fn["trajectory"](test_trajectory)
-            models_available = result.get("models_used", [])
-        except Exception as e:
-            models_missing.append(f"Error loading models: {str(e)}")
-        
+            dynamo_put_event(
+                user_id    = body.user_id,
+                event_type = "gps_score",
+                scores     = {
+                    "spoof_probability": result["spoof_probability"],
+                    "is_spoofed":        result["is_spoofed"],
+                    "models_used":       result["models_used"],
+                    "risk_factors":      result["risk_factors"],
+                },
+            )
+        except Exception:
+            pass
+
+    # ── WebSocket broadcast ───────────────────────────────
+    try:
+        broadcast = getattr(request.app.state, "broadcast", None)
+        if broadcast and body.user_id:
+            await broadcast("gps_score", uid, result)
+    except Exception:
+        pass
+    # ─────────────────────────────────────────────────────
+
+    return GPSSpoofResponse(
+        spoof_probability = result["spoof_probability"],
+        risk_score        = result["risk_score"],
+        is_spoofed        = result["is_spoofed"],
+        confidence        = result["confidence"],
+        model_scores      = result["model_scores"],
+        models_used       = result["models_used"],
+        risk_factors      = result.get("risk_factors", []),
+        user_id           = body.user_id,
+        device_id         = body.device_id,
+        timestamp         = datetime.now(timezone.utc).isoformat(),
+        latency_ms        = round(elapsed_ms, 2),
+    )
+
+
+@router.post("/score/point", summary="Score a single GPS point (limited accuracy)")
+async def score_single(body: SinglePointRequest):
+    """
+    Quick scoring for one GPS point.
+    Trajectory-based scoring is significantly more accurate.
+    """
+    try:
+        scorer = _get_scorer()
+        result = scorer["single"](
+            lat      = body.latitude,
+            lng      = body.longitude,
+            speed    = body.speed    or 0.0,
+            heading  = body.heading  or 0.0,
+            prev_lat = body.prev_latitude,
+            prev_lng = body.prev_longitude,
+        )
         return {
-            "status": "healthy" if models_available else "degraded",
-            "models_available": models_available,
-            "models_missing": models_missing
+            **result,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "warning": "Single-point scoring has limited accuracy. Use trajectory scoring.",
         }
-        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/health", summary="GPS module health check")
+async def health_check():
+    """Check which GPS scoring models are available."""
+    try:
+        scorer = _get_scorer()
+        test_traj = [
+            {"latitude": 37.7749, "longitude": -122.4194, "timestamp": 1_700_000_000.0},
+            {"latitude": 37.7750, "longitude": -122.4195, "timestamp": 1_700_000_010.0},
+            {"latitude": 37.7751, "longitude": -122.4196, "timestamp": 1_700_000_020.0},
+        ]
+        result = scorer["trajectory"](test_traj)
+        return {
+            "status":           "healthy",
+            "models_available": result.get("models_used", []),
+            "test_score":       round(result["spoof_probability"], 4),
+            "timestamp":        datetime.now(timezone.utc).isoformat(),
+        }
     except Exception as e:
         return {
-            "status": "unhealthy",
-            "error": str(e)
+            "status":    "unhealthy",
+            "error":     str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-
-

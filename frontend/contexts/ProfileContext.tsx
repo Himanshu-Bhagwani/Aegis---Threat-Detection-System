@@ -6,6 +6,7 @@ import {
   loadProfiles, saveProfiles, addProfile,
   updateProfileMetrics, generateAlerts,
 } from "@/lib/profiles";
+import { wsClient, WSEvent, dismissAlert as dismissAlertApi } from "@/lib/api";
 
 const SELECTED_KEY = "apeilo_selected_profile";
 
@@ -41,6 +42,28 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
     setHydrated(true);
   }, []);
 
+  // Auto-update profile metrics from real-time unified_risk WebSocket events.
+  // When the backend fires a unified_risk event with a user_id that matches a
+  // profile id, all module scores are refreshed from the event details.
+  useEffect(() => {
+    const unsub = wsClient.subscribe((evt: WSEvent) => {
+      if (evt.type !== "detection_event" || evt.event_type !== "unified_risk") return;
+      if (!evt.user_id || !evt.details) return;
+      const d = evt.details as Record<string, number>;
+      setProfiles(prev => {
+        if (!prev.find(p => p.id === evt.user_id)) return prev;
+        const partial: Record<string, number> = {};
+        if (d.gps_risk      != null) partial.gps_spoof     = d.gps_risk;
+        if (d.login_risk    != null) partial.login_anomaly  = d.login_risk;
+        if (d.password_risk != null) partial.password_leak  = d.password_risk;
+        if (d.fraud_risk    != null) partial.fraud_risk     = d.fraud_risk;
+        if (d.breach_risk   != null) partial.breach_risk    = d.breach_risk;
+        return updateProfileMetrics(prev, evt.user_id!, partial as any);
+      });
+    });
+    return unsub;
+  }, []);
+
   // Persist selectedId whenever it changes
   const setSelectedId = useCallback((id: string) => {
     setSelectedIdRaw(id);
@@ -56,12 +79,15 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const dismissAlert = useCallback((id: string) => {
+    // Optimistic local update
     setDismissedIds(prev => {
       const next = new Set(prev);
       next.add(id);
       localStorage.setItem("apeilo_dismissed_alerts", JSON.stringify(Array.from(next)));
       return next;
     });
+    // Persist to backend (best-effort; local state remains source of truth for demo profiles)
+    dismissAlertApi(id).catch(() => {});
   }, []);
 
   const rawAlerts = generateAlerts(profiles);

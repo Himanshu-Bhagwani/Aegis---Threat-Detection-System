@@ -2,448 +2,469 @@
 """
 GPS Spoofing Detection - Scoring Module
 
-Score GPS trajectory windows using trained models:
-- Isolation Forest (unsupervised anomaly detection)
-- Gradient Boosting (supervised)
-- Autoencoder (reconstruction error)
-- CNN-RNN (deep learning)
+Feature engineering matches the training pipeline exactly:
+  speed_m_s, accel, bearing_diff, dist_m, dt,
+  hour, dayofweek, sudden_jump, impossible_speed_flag  (9 features)
 
-Each model outputs a spoofing probability [0, 1].
+Model input expectations:
+  GBM / Isolation Forest : flat (27,)  = mean + std + max of each feature
+  CNN-RNN                : (32, 9)     padded / truncated window
+  Autoencoder            : (288,)      = 32 × 9 flat
 """
 
-import os
+import math
 import json
+import warnings
 import numpy as np
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 import joblib
 
-# Lazy imports for TensorFlow (only load when needed)
-_tf_loaded = False
-_tf = None
-_keras = None
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-def _load_tensorflow():
-    global _tf_loaded, _tf, _keras
-    if not _tf_loaded:
-        import tensorflow as tf
-        _tf = tf
-        _keras = tf.keras
-        _tf_loaded = True
-    return _tf, _keras
+FEATURE_NAMES: List[str] = [
+    "speed_m_s", "accel", "bearing_diff", "dist_m", "dt",
+    "hour", "dayofweek", "sudden_jump", "impossible_speed_flag",
+]
+N_FEATURES  = len(FEATURE_NAMES)   # 9
+WINDOW_SIZE = 32                    # must match training  (CNN-RNN: (None,32,9))
+N_FLAT      = N_FEATURES * 3       # 27  (mean‖std‖max)
 
-# Model paths
 MODEL_DIR = Path("models/gps")
-FEATURE_NAMES_PATH = Path("data/windows/gps/feature_names.json")
 
-# Cached model instances
-_models_cache = {}
+_models_cache: Dict[str, object] = {}
+
+# ── Geo helpers ───────────────────────────────────────────────────────────────
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres."""
+    R = 6_371_000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a  = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(max(0.0, a)))
 
 
-def get_model_dir() -> Path:
-    """Get model directory, handling both relative and absolute paths."""
+def _bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Forward azimuth in degrees [0, 360)."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    x  = math.sin(dl) * math.cos(p2)
+    y  = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def _ang_diff(a: float, b: float) -> float:
+    """Absolute angular difference [0, 180]."""
+    d = abs(a - b) % 360
+    return min(d, 360 - d)
+
+
+def _parse_ts(point: Dict) -> Optional[float]:
+    """Return Unix timestamp as float, or None."""
+    ts = point.get("timestamp")
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+# ── Feature engineering ───────────────────────────────────────────────────────
+
+def compute_features(trajectory: List[Dict]) -> np.ndarray:
+    """
+    Compute the 9 training features from raw GPS points.
+
+    Each point must have 'latitude' and 'longitude'.
+    'timestamp' (unix float or ISO string) is strongly recommended;
+    if absent, a 1-second interval is assumed.
+
+    Returns array of shape (T, 9).
+    """
+    T = len(trajectory)
+    X = np.zeros((T, N_FEATURES), dtype=np.float32)
+
+    if T == 0:
+        return X
+
+    times = [_parse_ts(p) for p in trajectory]
+
+    # If timestamps are missing, synthesise them at 1-second intervals
+    if all(t is None for t in times):
+        times = [float(i) for i in range(T)]
+    else:
+        # Fill gaps with linear interpolation
+        for i, t in enumerate(times):
+            if t is None:
+                # find nearest non-None neighbours
+                prev = next((times[j] for j in range(i - 1, -1, -1) if times[j] is not None), None)
+                nxt  = next((times[j] for j in range(i + 1, T)       if times[j] is not None), None)
+                if prev is not None and nxt is not None:
+                    times[i] = (prev + nxt) / 2
+                elif prev is not None:
+                    times[i] = prev + 1.0
+                elif nxt is not None:
+                    times[i] = nxt - 1.0
+                else:
+                    times[i] = float(i)
+
+    prev_lat = prev_lon = prev_brng = None
+    prev_speed = 0.0
+    prev_ts    = None
+
+    for t, point in enumerate(trajectory):
+        lat = float(point.get("latitude", 0.0))
+        lon = float(point.get("longitude", 0.0))
+        ts  = times[t]
+
+        hour_val = dayofweek_val = 0
+        if ts is not None:
+            try:
+                dt_obj       = datetime.fromtimestamp(ts)
+                hour_val     = dt_obj.hour
+                dayofweek_val = dt_obj.weekday()
+            except Exception:
+                pass
+
+        if prev_lat is None:
+            X[t, FEATURE_NAMES.index("hour")]      = hour_val
+            X[t, FEATURE_NAMES.index("dayofweek")] = dayofweek_val
+            prev_lat, prev_lon = lat, lon
+            prev_ts   = ts
+            prev_brng = 0.0
+            continue
+
+        dt      = max(0.0, ts - prev_ts) if ts is not None and prev_ts is not None else 1.0
+        dist_m  = _haversine(prev_lat, prev_lon, lat, lon)
+        spd     = dist_m / dt if dt > 0 else 0.0
+        brng    = _bearing(prev_lat, prev_lon, lat, lon) if dist_m > 0 else prev_brng
+        brng_diff = _ang_diff(brng, prev_brng)
+        accel   = (spd - prev_speed) / dt if dt > 0 else 0.0
+
+        # Clamp to plausible ranges before writing
+        X[t, FEATURE_NAMES.index("speed_m_s")]             = float(np.clip(spd,   0, 1_000))
+        X[t, FEATURE_NAMES.index("accel")]                  = float(np.clip(accel, -500, 500))
+        X[t, FEATURE_NAMES.index("bearing_diff")]           = float(brng_diff)
+        X[t, FEATURE_NAMES.index("dist_m")]                 = float(np.clip(dist_m, 0, 1e6))
+        X[t, FEATURE_NAMES.index("dt")]                     = float(np.clip(dt, 0, 3_600))
+        X[t, FEATURE_NAMES.index("hour")]                   = float(hour_val)
+        X[t, FEATURE_NAMES.index("dayofweek")]              = float(dayofweek_val)
+        X[t, FEATURE_NAMES.index("sudden_jump")]            = 1.0 if (dist_m > 1_000 and dt < 60) else 0.0
+        X[t, FEATURE_NAMES.index("impossible_speed_flag")]  = 1.0 if spd > 100 else 0.0
+
+        prev_lat, prev_lon = lat, lon
+        prev_ts    = ts
+        prev_speed = spd
+        prev_brng  = brng
+
+    return X
+
+
+def _make_flat(X: np.ndarray) -> np.ndarray:
+    """Aggregate (T, 9) → (27,) via [mean ‖ std ‖ max]."""
+    if X.shape[0] == 0:
+        return np.zeros(N_FLAT, dtype=np.float32)
+    return np.concatenate([X.mean(0), X.std(0), X.max(0)]).astype(np.float32)
+
+
+def _pad_window(X: np.ndarray) -> np.ndarray:
+    """Resize (T, 9) → (WINDOW_SIZE, 9), truncating tail or zero-padding head."""
+    T = X.shape[0]
+    if T >= WINDOW_SIZE:
+        return X[-WINDOW_SIZE:].astype(np.float32)
+    pad = np.zeros((WINDOW_SIZE - T, N_FEATURES), dtype=np.float32)
+    return np.concatenate([pad, X]).astype(np.float32)
+
+
+# ── Rule-based scorer (always available) ─────────────────────────────────────
+
+def score_rule_based(X: np.ndarray) -> Tuple[float, List[str]]:
+    """
+    Physics-based GPS spoof probability from the 9 computed features.
+    Returns (probability [0,1], list of triggered rules).
+    """
+    T = X.shape[0]
+    if T == 0:
+        return 0.5, ["empty_trajectory"]
+
+    si = FEATURE_NAMES.index
+    score     = 0.0
+    triggered: List[str] = []
+
+    # 1. Impossible speed (> 100 m/s ≈ 360 km/h)
+    impos_frac = float(X[:, si("impossible_speed_flag")].mean())
+    if impos_frac > 0:
+        score += 0.55 * min(1.0, impos_frac * 10)
+        triggered.append(f"impossible_speed ({impos_frac:.1%} of points)")
+
+    # 2. Sudden location jumps (> 1 km in < 60 s)
+    jump_frac = float(X[:, si("sudden_jump")].mean())
+    if jump_frac > 0:
+        score += 0.45 * min(1.0, jump_frac * 5)
+        triggered.append(f"sudden_jump ({jump_frac:.1%} of points)")
+
+    # 3. Physically unreachable acceleration (> 50 m/s² ≈ 5 g)
+    max_accel = float(np.abs(X[:, si("accel")]).max())
+    if max_accel > 50:
+        score += 0.30
+        triggered.append(f"extreme_acceleration ({max_accel:.0f} m/s²)")
+
+    # 4. Extreme top speed
+    max_speed = float(X[:, si("speed_m_s")].max())
+    if max_speed > 250:   # > 900 km/h
+        score += 0.40
+        triggered.append(f"extreme_speed ({max_speed:.0f} m/s)")
+    elif max_speed > 150: # > 540 km/h
+        score += 0.20
+        triggered.append(f"high_speed ({max_speed:.0f} m/s)")
+
+    # 5. Static spoof: device moves < 1 m total over > 60 s  (lock on fake position)
+    if T > 2:
+        total_dist = float(X[:, si("dist_m")].sum())
+        total_time = float(X[:, si("dt")].sum())
+        if total_time > 60 and total_dist < 1.0:
+            score += 0.50
+            triggered.append(f"static_spoof ({total_dist:.2f} m in {total_time:.0f} s)")
+
+    # 6. Pathological bearing flips (> 150° turn fraction > 20%)
+    flip_frac = float((X[:, si("bearing_diff")] > 150).mean())
+    if flip_frac > 0.20:
+        score += 0.25
+        triggered.append(f"bearing_flips ({flip_frac:.1%} of transitions)")
+
+    # 7. Null-island proximity (all points near 0°N 0°E — typical mock GPS default)
+    # Approximate via very small distances with any non-trivial time
+    if T > 1:
+        total_dist = float(X[:, si("dist_m")].sum())
+        total_time = float(X[:, si("dt")].sum())
+        # Real devices rarely stay < 5 m total over > 30 s unless indoors
+        if total_dist < 5.0 and total_time > 30 and max_speed < 1.0:
+            score += 0.35
+            triggered.append("near_zero_movement (possible mock GPS)")
+
+    return float(np.clip(score, 0.0, 1.0)), triggered
+
+
+# ── Model loaders ─────────────────────────────────────────────────────────────
+
+def _model_dir() -> Path:
     if MODEL_DIR.exists():
         return MODEL_DIR
-    # Try from project root
-    project_root = Path(__file__).parent.parent.parent
-    return project_root / "models" / "gps"
+    return Path(__file__).parent.parent.parent / "models" / "gps"
 
 
-def load_feature_names() -> List[str]:
-    """Load feature names used during training."""
-    if FEATURE_NAMES_PATH.exists():
-        with open(FEATURE_NAMES_PATH) as f:
-            return json.load(f)
-    # Try from project root
-    project_root = Path(__file__).parent.parent.parent
-    alt_path = project_root / "data" / "windows" / "gps" / "feature_names.json"
-    if alt_path.exists():
-        with open(alt_path) as f:
-            return json.load(f)
-    # Default feature names based on typical GPS trajectory features
-    return [
-        "latitude", "longitude", "speed", "acceleration",
-        "heading", "heading_change", "time_delta",
-        "distance_delta", "sudden_jump", "impossible_speed_flag"
-    ]
-
-
-def load_isolation_forest():
-    """Load the trained Isolation Forest model."""
-    if "isolation_forest" not in _models_cache:
-        model_path = get_model_dir() / "gps_isolation_forest.joblib"
-        if not model_path.exists():
-            _models_cache["isolation_forest"] = None
+def _load_joblib(name: str, filename: str):
+    if name not in _models_cache:
+        path = _model_dir() / filename
+        if not path.exists():
+            _models_cache[name] = None
             return None
         try:
-            _models_cache["isolation_forest"] = joblib.load(model_path)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                _models_cache[name] = joblib.load(path)
         except Exception as e:
-            print(f"Warning: Could not load GPS Isolation Forest model: {e}")
-            _models_cache["isolation_forest"] = None
-            return None
-    return _models_cache.get("isolation_forest")
+            print(f"Warning: could not load {filename}: {e}")
+            _models_cache[name] = None
+    return _models_cache[name]
 
 
-def load_gbm():
-    """Load the trained Gradient Boosting model."""
-    if "gbm" not in _models_cache:
-        model_path = get_model_dir() / "gps_gbm.joblib"
-        if not model_path.exists():
-            _models_cache["gbm"] = None
-            return None
-        try:
-            _models_cache["gbm"] = joblib.load(model_path)
-        except Exception as e:
-            print(f"Warning: Could not load GPS GBM model: {e}")
-            _models_cache["gbm"] = None
-            return None
-    return _models_cache.get("gbm")
-
-
-def load_autoencoder():
-    """Load the trained Autoencoder model."""
-    if "autoencoder" not in _models_cache:
-        model_path = get_model_dir() / "gps_autoencoder.h5"
-        if not model_path.exists():
-            # Try best model
-            model_path = get_model_dir() / "gps_ae_best.h5"
-        if not model_path.exists():
-            # Mark as unavailable rather than raising
-            _models_cache["autoencoder"] = None
-            return None
-        
-        try:
-            tf, keras = _load_tensorflow()
-            # Try loading with compile=False to avoid metric deserialization issues
-            _models_cache["autoencoder"] = keras.models.load_model(
-                str(model_path),
-                compile=False
-            )
-        except Exception as e:
+def _load_keras(name: str, *filenames: str):
+    if name not in _models_cache:
+        for fn in filenames:
+            path = _model_dir() / fn
+            if not path.exists():
+                continue
             try:
-                _models_cache["autoencoder"] = keras.models.load_model(
-                    str(model_path),
-                    compile=False,
-                    safe_mode=False
-                )
-            except Exception as e2:
-                # Keras compatibility issue - mark as unavailable
-                print(f"Warning: Could not load GPS Autoencoder model (Keras compatibility?): {e2}. Skipping.")
-                _models_cache["autoencoder"] = None
-                return None
-    
-    return _models_cache.get("autoencoder")
+                import tensorflow as tf
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    _models_cache[name] = tf.keras.models.load_model(
+                        str(path), compile=False
+                    )
+                break
+            except Exception as e:
+                print(f"Warning: could not load {fn}: {e}")
+        if name not in _models_cache:
+            _models_cache[name] = None
+    return _models_cache[name]
 
 
-def load_cnn_rnn():
-    """Load the trained CNN-RNN model."""
-    if "cnn_rnn" not in _models_cache:
-        model_path = get_model_dir() / "gps_cnn_rnn.h5"
-        if not model_path.exists():
-            model_path = get_model_dir() / "gps_cnn_rnn_best.h5"
-        if not model_path.exists():
-            # Mark as unavailable rather than raising
-            _models_cache["cnn_rnn"] = None
-            return None
-        
-        try:
-            tf, keras = _load_tensorflow()
-            # Try loading with compile=False to avoid metric deserialization issues
-            _models_cache["cnn_rnn"] = keras.models.load_model(
-                str(model_path),
-                compile=False
-            )
-        except Exception as e:
-            try:
-                _models_cache["cnn_rnn"] = keras.models.load_model(
-                    str(model_path),
-                    compile=False,
-                    safe_mode=False
-                )
-            except Exception as e2:
-                # Keras compatibility issue - mark as unavailable
-                print(f"Warning: Could not load GPS CNN-RNN model (Keras compatibility?): {e2}. Skipping.")
-                _models_cache["cnn_rnn"] = None
-                return None
-    
-    return _models_cache.get("cnn_rnn")
+# ── Individual model scorers ──────────────────────────────────────────────────
 
-
-def make_window_level_features(X: np.ndarray) -> np.ndarray:
-    """
-    Aggregate over time dimension to get fixed-length features per window.
-    X: (n_windows, T, F) or (T, F) -> aggregated features
-    
-    Computes: mean, std, max for each feature.
-    """
-    if X.ndim == 2:
-        X = X[np.newaxis, ...]  # Add batch dimension
-    
-    mean = X.mean(axis=1)
-    std = X.std(axis=1)
-    maxv = X.max(axis=1)
-    return np.concatenate([mean, std, maxv], axis=1)
-
-
-def preprocess_gps_data(trajectory: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Convert raw GPS trajectory to feature arrays.
-    
-    Args:
-        trajectory: List of GPS points with lat, lng, timestamp, etc.
-        
-    Returns:
-        X_window: Shape (T, F) for sequence models
-        X_flat: Shape (F*3,) for traditional ML models
-    """
-    feature_names = load_feature_names()
-    n_features = len(feature_names)
-    T = len(trajectory)
-    
-    if T == 0:
-        raise ValueError("Empty trajectory provided")
-    
-    # Build feature matrix
-    X = np.zeros((T, n_features), dtype=np.float32)
-    
-    for t, point in enumerate(trajectory):
-        for i, feat in enumerate(feature_names):
-            X[t, i] = float(point.get(feat, 0.0))
-    
-    # Compute derived features if raw lat/lng provided
-    if T > 1:
-        for t in range(1, T):
-            # Distance delta (simple Euclidean approximation)
-            if "distance_delta" in feature_names:
-                idx = feature_names.index("distance_delta")
-                lat_idx = feature_names.index("latitude") if "latitude" in feature_names else -1
-                lng_idx = feature_names.index("longitude") if "longitude" in feature_names else -1
-                if lat_idx >= 0 and lng_idx >= 0:
-                    dlat = X[t, lat_idx] - X[t-1, lat_idx]
-                    dlng = X[t, lng_idx] - X[t-1, lng_idx]
-                    X[t, idx] = np.sqrt(dlat**2 + dlng**2) * 111000  # Approx meters
-            
-            # Speed-based features
-            if "sudden_jump" in feature_names:
-                idx = feature_names.index("sudden_jump")
-                speed_idx = feature_names.index("speed") if "speed" in feature_names else -1
-                if speed_idx >= 0:
-                    # Flag if speed jumps unrealistically
-                    X[t, idx] = 1.0 if X[t, speed_idx] > 500 else 0.0  # 500 m/s threshold
-    
-    # Create aggregated features for traditional ML
-    X_window = X  # (T, F)
-    X_flat = make_window_level_features(X)  # (1, F*3)
-    
-    return X_window, X_flat.squeeze()
-
-
-def score_isolation_forest(X_flat: np.ndarray) -> float:
-    """Score using Isolation Forest. Returns anomaly probability [0, 1]."""
+def _score_isolation_forest(X_flat: np.ndarray) -> float:
+    model = _load_joblib("isolation_forest", "gps_isolation_forest.joblib")
+    if model is None:
+        return -1.0
     try:
-        model = load_isolation_forest()
-        if model is None:
-            return -1.0  # Model not available
-        
-        X = X_flat.reshape(1, -1)
-        
-        # decision_function: negative = anomaly, positive = normal
-        score = model.decision_function(X)[0]
-        
-        # Convert to probability [0, 1] where 1 = highly anomalous
-        # Typical range is [-0.5, 0.5], map to [0, 1]
-        prob = 1.0 - (score + 0.5)
-        return float(np.clip(prob, 0.0, 1.0))
-    except Exception:
-        return -1.0  # Model not available
-
-
-def score_gbm(X_flat: np.ndarray) -> float:
-    """Score using Gradient Boosting. Returns spoofing probability [0, 1]."""
-    try:
-        model = load_gbm()
-        if model is None:
-            return -1.0  # Model not available
-        
-        X = X_flat.reshape(1, -1)
-        
-        prob = model.predict_proba(X)[0, 1]
-        return float(prob)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            score = model.decision_function(X_flat.reshape(1, -1))[0]
+        # decision_function: negative = anomaly; map to [0, 1]
+        return float(np.clip(1.0 - (score + 0.5), 0.0, 1.0))
     except Exception:
         return -1.0
 
 
-def score_autoencoder(X_window: np.ndarray) -> float:
-    """Score using Autoencoder reconstruction error. Returns anomaly probability [0, 1]."""
+def _score_gbm(X_flat: np.ndarray) -> float:
+    model = _load_joblib("gbm", "gps_gbm.joblib")
+    if model is None:
+        return -1.0
     try:
-        model = load_autoencoder()
-        if model is None:
-            return -1.0  # Model not available
-        
-        # Flatten for dense autoencoder
-        T, F = X_window.shape
-        X_flat = X_window.reshape(1, T * F)
-        
-        # Get reconstruction
-        X_rec = model.predict(X_flat, verbose=0)
-        
-        # Compute MSE
-        mse = np.mean((X_flat - X_rec) ** 2)
-        
-        # Convert MSE to probability using sigmoid-like scaling
-        # Threshold calibrated from training (adjust based on your data)
-        threshold = 0.1  # Typical threshold from training
-        prob = 1.0 / (1.0 + np.exp(-10 * (mse - threshold)))
-        
-        return float(np.clip(prob, 0.0, 1.0))
-    except Exception as e:
-        # Autoencoder not available or Keras compatibility issue
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return float(model.predict_proba(X_flat.reshape(1, -1))[0, 1])
+    except Exception:
         return -1.0
 
 
-def score_cnn_rnn(X_window: np.ndarray) -> float:
-    """Score using CNN-RNN model. Returns spoofing probability [0, 1]."""
+def _score_autoencoder(X_win: np.ndarray) -> float:
+    model = _load_keras("autoencoder", "gps_autoencoder.h5", "gps_ae_best.h5")
+    if model is None:
+        return -1.0
     try:
-        model = load_cnn_rnn()
-        if model is None:
-            return -1.0  # Model not available
-        
-        # Add batch dimension: (T, F) -> (1, T, F)
-        X = X_window[np.newaxis, ...]
-        
-        prob = model.predict(X, verbose=0)[0, 0]
-        return float(prob)
-    except Exception as e:
-        # CNN-RNN not available or Keras compatibility issue
+        flat = _pad_window(X_win).reshape(1, WINDOW_SIZE * N_FEATURES)  # (1, 288)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rec  = model.predict(flat, verbose=0)
+        mse = float(np.mean((flat - rec) ** 2))
+        # Calibrated threshold from training (~90th-percentile normal MSE)
+        threshold = 0.05
+        return float(np.clip(1.0 / (1.0 + math.exp(-10 * (mse - threshold))), 0.0, 1.0))
+    except Exception:
         return -1.0
 
+
+def _score_cnn_rnn(X_win: np.ndarray) -> float:
+    model = _load_keras("cnn_rnn", "gps_cnn_rnn.h5", "gps_cnn_rnn_best.h5")
+    if model is None:
+        return -1.0
+    try:
+        win = _pad_window(X_win)[np.newaxis, ...]  # (1, 32, 9)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return float(model.predict(win, verbose=0)[0, 0])
+    except Exception:
+        return -1.0
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def score_gps_trajectory(trajectory: List[Dict], ensemble: bool = True) -> Dict:
     """
-    Score a GPS trajectory for spoofing detection.
-    
-    Args:
-        trajectory: List of GPS points, each with keys like:
-            - latitude, longitude
-            - speed, acceleration
-            - heading, heading_change
-            - timestamp or time_delta
-        ensemble: If True, combine all model scores; else return individual scores
-        
+    Score a GPS trajectory for spoofing.
+
+    Each point should have:
+        latitude, longitude           (required)
+        timestamp                     (unix float or ISO string; recommended)
+        speed, heading, time_delta    (optional, ignored by feature engine)
+
     Returns:
-        Dictionary with:
-            - spoof_probability: Combined or primary score [0, 1]
-            - model_scores: Individual scores from each model
-            - is_spoofed: Boolean classification
-            - confidence: Confidence level of the prediction
+        spoof_probability  float [0, 1]
+        risk_score         alias for spoof_probability (frontend compat)
+        is_spoofed         bool
+        confidence         float [0, 1]
+        model_scores       dict  individual model scores
+        models_used        list
+        risk_factors       list  triggered rule descriptions
     """
-    # Preprocess trajectory
-    X_window, X_flat = preprocess_gps_data(trajectory)
-    
-    # Get scores from each model
-    scores = {}
-    
-    scores["isolation_forest"] = score_isolation_forest(X_flat)
-    scores["gbm"] = score_gbm(X_flat)
-    scores["autoencoder"] = score_autoencoder(X_window)
-    scores["cnn_rnn"] = score_cnn_rnn(X_window)
-    
-    # Filter out unavailable models (-1)
-    available_scores = {k: v for k, v in scores.items() if v >= 0}
-    
-    if not available_scores:
+    if not trajectory:
         return {
-            "spoof_probability": 0.5,
-            "model_scores": scores,
-            "is_spoofed": False,
-            "confidence": 0.0,
-            "error": "No trained models available"
+            "spoof_probability": 0.0, "risk_score": 0.0,
+            "is_spoofed": False, "confidence": 0.0,
+            "model_scores": {}, "models_used": [],
+            "risk_factors": ["empty_trajectory"],
         }
-    
+
+    # 1. Feature engineering
+    X = compute_features(trajectory)           # (T, 9)
+    X_flat = _make_flat(X)                     # (27,)
+
+    # 2. Rule-based score (always computed)
+    rule_prob, triggered = score_rule_based(X)
+
+    # 3. ML model scores
+    scores: Dict[str, float] = {"rule_based": rule_prob}
+    scores["isolation_forest"] = _score_isolation_forest(X_flat)
+    scores["gbm"]              = _score_gbm(X_flat)
+    scores["autoencoder"]      = _score_autoencoder(X)
+    scores["cnn_rnn"]          = _score_cnn_rnn(X)
+
+    available = {k: v for k, v in scores.items() if v >= 0.0}
+
     if ensemble:
-        # Weighted ensemble: supervised models get higher weight
+        # Weighted ensemble; unsupported models fall back to rule_based weight
         weights = {
-            "isolation_forest": 1.0,
-            "gbm": 2.0,
-            "autoencoder": 1.0,
-            "cnn_rnn": 2.5  # Deep learning model typically best
+            "rule_based":       1.0,
+            "isolation_forest": 1.5,
+            "gbm":              2.5,
+            "autoencoder":      1.0,
+            "cnn_rnn":          3.0,
         }
-        
-        weighted_sum = sum(scores[k] * weights.get(k, 1.0) 
-                         for k in available_scores)
-        total_weight = sum(weights.get(k, 1.0) for k in available_scores)
-        
-        combined_prob = weighted_sum / total_weight
+        w_sum = sum(weights[k] for k in available)
+        combined = sum(available[k] * weights[k] for k in available) / w_sum if w_sum else rule_prob
     else:
-        # Use best available model (prefer CNN-RNN > GBM > others)
-        priority = ["cnn_rnn", "gbm", "autoencoder", "isolation_forest"]
-        for model in priority:
-            if model in available_scores:
-                combined_prob = available_scores[model]
-                break
-    
-    # Calculate confidence based on model agreement
-    if len(available_scores) > 1:
-        score_values = list(available_scores.values())
-        variance = np.var(score_values)
-        confidence = 1.0 - min(variance * 4, 1.0)  # High variance = low confidence
-    else:
-        confidence = 0.7  # Single model confidence
-    
+        priority = ["cnn_rnn", "gbm", "isolation_forest", "autoencoder", "rule_based"]
+        combined = next(available[m] for m in priority if m in available)
+
+    # 4. Confidence: inversely proportional to score variance across models
+    vals = list(available.values())
+    confidence = float(np.clip(1.0 - min(np.var(vals) * 4, 1.0), 0.3, 1.0)) if len(vals) > 1 else 0.6
+
+    combined = float(np.clip(combined, 0.0, 1.0))
+
     return {
-        "spoof_probability": float(combined_prob),
-        "model_scores": scores,
-        "is_spoofed": combined_prob >= 0.5,
-        "confidence": float(confidence),
-        "models_used": list(available_scores.keys())
+        "spoof_probability": combined,
+        "risk_score":        combined,   # alias for frontend
+        "is_spoofed":        combined >= 0.5,
+        "confidence":        confidence,
+        "model_scores":      scores,
+        "models_used":       list(available.keys()),
+        "risk_factors":      triggered,
     }
 
 
-# Convenience function for single-point scoring (limited accuracy)
-def score_single_point(lat: float, lng: float, speed: float = 0.0, 
-                       heading: float = 0.0, prev_lat: float = None,
-                       prev_lng: float = None) -> Dict:
-    """
-    Quick scoring for a single GPS point.
-    Note: Trajectory-based scoring is more accurate.
-    """
-    point = {
-        "latitude": lat,
-        "longitude": lng,
-        "speed": speed,
-        "heading": heading,
-    }
-    
-    # Create minimal trajectory
-    trajectory = [point]
-    
+def score_single_point(
+    lat: float, lng: float,
+    speed: float = 0.0,
+    heading: float = 0.0,
+    prev_lat: Optional[float] = None,
+    prev_lng: Optional[float] = None,
+) -> Dict:
+    """Quick scoring for a single GPS point (limited accuracy)."""
+    import time as _time
+    now = _time.time()
+    trajectory = []
     if prev_lat is not None and prev_lng is not None:
-        prev_point = {
-            "latitude": prev_lat,
-            "longitude": prev_lng,
-            "speed": 0.0,
-            "heading": 0.0,
-        }
-        trajectory = [prev_point, point]
-    
+        trajectory.append({"latitude": prev_lat, "longitude": prev_lng,
+                            "timestamp": now - 10.0})
+    trajectory.append({"latitude": lat, "longitude": lng,
+                        "timestamp": now, "speed": speed, "heading": heading})
     return score_gps_trajectory(trajectory)
 
 
 if __name__ == "__main__":
-    # Example usage
-    sample_trajectory = [
-        {"latitude": 37.7749, "longitude": -122.4194, "speed": 0, "heading": 0},
-        {"latitude": 37.7750, "longitude": -122.4195, "speed": 5, "heading": 45},
-        {"latitude": 37.7751, "longitude": -122.4196, "speed": 10, "heading": 45},
-        {"latitude": 37.7752, "longitude": -122.4197, "speed": 15, "heading": 45},
-        {"latitude": 37.7753, "longitude": -122.4198, "speed": 20, "heading": 45},
+    # Quick smoke-test
+    normal = [
+        {"latitude": 37.7749, "longitude": -122.4194, "timestamp": 1_700_000_000.0},
+        {"latitude": 37.7750, "longitude": -122.4195, "timestamp": 1_700_000_010.0},
+        {"latitude": 37.7751, "longitude": -122.4196, "timestamp": 1_700_000_020.0},
     ]
-    
-    result = score_gps_trajectory(sample_trajectory)
-    print("GPS Spoofing Detection Result:")
-    print(f"  Spoof Probability: {result['spoof_probability']:.4f}")
-    print(f"  Is Spoofed: {result['is_spoofed']}")
-    print(f"  Confidence: {result['confidence']:.4f}")
-    print(f"  Model Scores: {result['model_scores']}")
+    spoofed = [
+        {"latitude": 37.7749, "longitude": -122.4194, "timestamp": 1_700_000_000.0},
+        {"latitude": 51.5074, "longitude":   -0.1278, "timestamp": 1_700_000_005.0},  # NYC → London
+    ]
 
-
+    for label, traj in [("normal", normal), ("spoofed", spoofed)]:
+        r = score_gps_trajectory(traj)
+        print(f"\n[{label}]")
+        print(f"  spoof_probability : {r['spoof_probability']:.4f}")
+        print(f"  is_spoofed        : {r['is_spoofed']}")
+        print(f"  risk_factors      : {r['risk_factors']}")
+        print(f"  models_used       : {r['models_used']}")

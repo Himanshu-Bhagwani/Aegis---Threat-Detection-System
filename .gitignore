@@ -81,3 +81,5 @@ ageis-dead3-firebase-adminsdk-fbsvc-589b74d7f8.json
 # Notebooks
 # -----------------------------------
 notebooks/*.ipynb
+
+.claude/

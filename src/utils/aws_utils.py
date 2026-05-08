@@ -657,6 +657,9 @@ def cw_put_metric(
     try:
         client.put_metric_data(Namespace=namespace, MetricData=[metric])
         return True
+    except NoCredentialsError:
+        logger.debug("CloudWatch put_metric skipped: no AWS credentials")
+        return False
     except ClientError as e:
         logger.warning("CloudWatch put_metric failed: %s", e.response["Error"]["Message"])
         return False
