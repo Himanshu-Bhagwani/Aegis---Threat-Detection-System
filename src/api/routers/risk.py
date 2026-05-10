@@ -15,6 +15,7 @@ from typing import List, Dict, Optional, Any
 try:
     from src.utils.aws_utils import (
         dynamo_put_event,
+        dynamo_put_alert,
         cw_put_detection_metrics,
         cw_put_alert_metric,
         sns_alert_critical_risk,
@@ -23,6 +24,7 @@ try:
 except Exception:
     _AWS_OK = False
     def dynamo_put_event(*a, **k): return None
+    def dynamo_put_alert(*a, **k): return None
     def cw_put_detection_metrics(*a, **k): return None
     def cw_put_alert_metric(*a, **k): return None
     def sns_alert_critical_risk(*a, **k): return None
@@ -360,6 +362,20 @@ async def compute_unified_risk(body: UnifiedRiskRequest, request: Request):
             pass
 
         if unified >= CRITICAL_THRESHOLD:
+            try:
+                dynamo_put_alert(
+                    user_id    = uid,
+                    alert_type = "critical_risk",
+                    risk_score = unified,
+                    details    = {
+                        "risk_level":      result.get("risk_level"),
+                        "primary_threats": result.get("primary_threats", []),
+                        "event_id":        result.get("event_id", ""),
+                        "recommended_actions": result.get("recommended_actions", []),
+                    },
+                )
+            except Exception:
+                pass
             try:
                 sns_alert_critical_risk(
                     user_id             = uid,
