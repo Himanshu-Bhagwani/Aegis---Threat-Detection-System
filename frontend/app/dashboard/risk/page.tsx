@@ -1,9 +1,19 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import { useProfiles } from "@/contexts/ProfileContext";
 import { riskColor, formatScore } from "@/lib/api";
 import { THRESHOLDS } from "@/lib/profiles";
+
+const DynCompare = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.ProfileCompareChart })),
+  { ssr: false, loading: () => <div style={{ height: 260, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>Loading…</div> }
+);
+const DynRadar = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.ModuleRadarChart })),
+  { ssr: false }
+);
 
 const MODULE_KEYS = [
   { key: "gps_spoof",     label: "GPS Spoofing",              desc: "Probability of GPS location spoofing", color: "var(--accent)" },
@@ -44,6 +54,23 @@ export default function RiskPage() {
           All identity profiles — click a profile to inspect or adjust module scores
         </p>
       </div>
+
+      {/* ── All-profile comparison chart ─────── */}
+      {profiles.length > 0 && (
+        <div className="panel" style={{ padding: "20px 22px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 14 }}>
+            Profile Risk Comparison — All Modules
+          </div>
+          <DynCompare data={profiles.map(p => ({
+            name:     p.name.split(" ")[0],
+            GPS:      Math.round(p.metrics.gps_spoof      * 100),
+            Login:    Math.round(p.metrics.login_anomaly  * 100),
+            Password: Math.round(p.metrics.password_leak  * 100),
+            Fraud:    Math.round(p.metrics.fraud_risk     * 100),
+            Breach:   Math.round(p.metrics.breach_risk    * 100),
+          }))} />
+        </div>
+      )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {profiles.map(p => {
@@ -180,6 +207,18 @@ export default function RiskPage() {
 
                     {/* Right side */}
                     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                      {/* Radar chart */}
+                      <div style={{ padding: "16px 18px", borderRadius: 12, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 4 }}>Module Radar</div>
+                        <DynRadar data={[
+                          { module: "GPS",      value: Math.round(p.metrics.gps_spoof     * 100), fullMark: 100 },
+                          { module: "Login",    value: Math.round(p.metrics.login_anomaly * 100), fullMark: 100 },
+                          { module: "Password", value: Math.round(p.metrics.password_leak * 100), fullMark: 100 },
+                          { module: "Fraud",    value: Math.round(p.metrics.fraud_risk    * 100), fullMark: 100 },
+                          { module: "Breach",   value: Math.round(p.metrics.breach_risk   * 100), fullMark: 100 },
+                        ]} />
+                      </div>
+
                       {/* Unified score */}
                       <div style={{
                         padding: "20px 22px", borderRadius: 12,

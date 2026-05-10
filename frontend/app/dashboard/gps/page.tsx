@@ -1,8 +1,18 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import { scoreGPS, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
+
+const DynModelScores = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.ModelScoresChart })),
+  { ssr: false }
+);
+const DynMiniBar = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.MiniModuleBar })),
+  { ssr: false }
+);
 
 const now = Date.now();
 const SCENARIOS = [
@@ -79,7 +89,7 @@ const IconChevronRight = () => (
 );
 
 export default function GpsPage() {
-  const { selected, updateMetrics } = useProfiles();
+  const { selected, profiles, updateMetrics } = useProfiles();
   const [result,  setResult]  = useState<any>(null);
   const [loading, setLoading] = useState<number | null>(null);
   const [updated, setUpdated] = useState(false);
@@ -136,6 +146,20 @@ export default function GpsPage() {
           </div>
         )}
       </div>
+
+      {/* ── GPS risk across all profiles ──────── */}
+      {profiles.length > 0 && (
+        <div className="panel" style={{ padding: "18px 22px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 14 }}>
+            GPS Spoofing Risk — All Profiles
+          </div>
+          <DynMiniBar data={profiles.map(p => ({
+            module: p.name.split(" ")[0],
+            score:  Math.round(p.metrics.gps_spoof * 100),
+            color:  p.metrics.gps_spoof >= 0.75 ? "#ef4444" : p.metrics.gps_spoof >= 0.50 ? "#f97316" : p.metrics.gps_spoof >= 0.25 ? "#f59e0b" : "#00ff88",
+          }))} />
+        </div>
+      )}
 
       {/* Scenario cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
@@ -219,21 +243,13 @@ export default function GpsPage() {
               )}
             </div>
 
-            {/* Model scores */}
+            {/* Model scores chart */}
             {result.model_scores && Object.keys(result.model_scores).length > 0 && (
-              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
-                {Object.entries(result.model_scores as Record<string, number>)
-                  .filter(([, v]) => v >= 0)
-                  .map(([name, val]) => (
-                    <div key={name} style={{ textAlign: "center" }}>
-                      <div style={{ fontSize: 16, fontWeight: 800, fontFamily: "var(--font-mono)", color: riskColor(val), letterSpacing: "-0.01em" }}>
-                        {(val * 100).toFixed(0)}%
-                      </div>
-                      <div style={{ fontSize: 9, color: "var(--text-disabled)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 3 }}>
-                        {name.replace(/_/g, " ")}
-                      </div>
-                    </div>
-                  ))}
+              <div style={{ flex: 1, minWidth: 240 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 10 }}>
+                  ML Model Breakdown
+                </div>
+                <DynModelScores scores={result.model_scores} />
               </div>
             )}
           </div>

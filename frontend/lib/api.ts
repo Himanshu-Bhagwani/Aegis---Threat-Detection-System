@@ -244,6 +244,45 @@ export async function dismissAlert(alertId: string) {
 }
 
 // ═══════════════════════════════════════════════════════
+// AI NATURAL LANGUAGE QUERY
+// ═══════════════════════════════════════════════════════
+
+export interface NLQueryProfile {
+  id:            string;
+  name:          string;
+  email:         string;
+  risk_level:    string;
+  unified_score: number;
+  gps_spoof:     number;
+  login_anomaly: number;
+  password_leak: number;
+  fraud_risk:    number;
+  breach_risk:   number;
+}
+
+export interface NLQueryRequest {
+  query:    string;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
+  profiles?: NLQueryProfile[];
+}
+
+export interface NLQueryResponse {
+  answer:        string;
+  chart_type:    "bar" | "line" | "pie" | "table" | "metric";
+  chart_data:    Record<string, any>[];
+  chart_config:  Record<string, any>;
+  table_data:    Record<string, string>[] | null;
+  table_headers: string[] | null;
+  intent:        string;
+  query_time_ms: number;
+  ollama_model:  string;
+}
+
+export async function queryNL(req: NLQueryRequest): Promise<NLQueryResponse> {
+  return apiFetch("/query/nl", { method: "POST", body: JSON.stringify(req) });
+}
+
+// ═══════════════════════════════════════════════════════
 // HEALTH
 // ═══════════════════════════════════════════════════════
 export async function getHealth() {

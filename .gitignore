@@ -84,3 +84,7 @@ notebooks/*.ipynb
 
 .claude/
 .pytest_cache/
+# -----------------------------------
+# Local project documentation
+# -----------------------------------
+PROJECT_OVERVIEW.txt

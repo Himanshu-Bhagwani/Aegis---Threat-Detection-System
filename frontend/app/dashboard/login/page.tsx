@@ -1,8 +1,18 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import { scoreLogin, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
+
+const DynHourRisk = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.HourRiskChart })),
+  { ssr: false }
+);
+const DynSignal = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.SignalContribChart })),
+  { ssr: false }
+);
 
 const IconLock = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -94,6 +104,17 @@ export default function LoginAnomalyPage() {
             </span>
           </div>
         )}
+      </div>
+
+      {/* ── Hour of day anomaly risk ──────────── */}
+      <div className="panel" style={{ padding: "18px 22px" }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 14 }}>
+          Login Anomaly Risk by Hour of Day — Statistical Baseline
+        </div>
+        <DynHourRisk highlightHour={form.hour_of_day} />
+        <div style={{ fontSize: 10, color: "var(--text-disabled)", marginTop: 6 }}>
+          Blue line = selected hour ({form.hour_of_day}:00) · Risk peaks during off-hours (midnight–5 AM)
+        </div>
       </div>
 
       {/* Main grid */}
@@ -210,7 +231,21 @@ export default function LoginAnomalyPage() {
                 }} />
               </div>
 
-              {/* Risk factors */}
+              {/* Signal contribution chart */}
+              <div style={{ marginTop: 4 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+                  Signal Contributions
+                </div>
+                <DynSignal factors={[
+                  { name: "Hour-of-day Anomaly",  score: Math.min(1, form.hour_of_day >= 22 || form.hour_of_day <= 5 ? 0.8 : 0.1),  color: "#3d7fff" },
+                  { name: "Failed Attempts",       score: Math.min(1, form.failed_10min * 0.18),                                      color: "#ef4444" },
+                  { name: "New / Unknown Device",  score: form.is_new_comp * 0.7,                                                     color: "#f97316" },
+                  { name: "Computer Deviation",    score: Math.min(1, form.comp_deg / 360),                                           color: "#8b5cf6" },
+                  { name: "Login Gap",             score: Math.min(1, form.time_since_user_last / 86400),                             color: "#06b6d4" },
+                ]} />
+              </div>
+
+              {/* Risk factors text */}
               {result.risk_factors?.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>

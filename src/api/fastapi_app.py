@@ -55,6 +55,7 @@ from src.api.routers import password as password_router
 from src.api.routers import risk     as risk_router
 from src.api.routers import breach   as breach_router
 from src.api.routers import device   as device_router
+from src.api.routers import query    as query_router
 
 # ── Auth dependency ───────────────────────────────────
 from src.api.auth_deps import require_auth, optional_auth, create_local_jwt
@@ -216,6 +217,7 @@ app.include_router(fraud_router.router,    prefix="/fraud",    tags=["Fraud Dete
 app.include_router(risk_router.router,     prefix="/risk",     tags=["Unified Risk"])
 app.include_router(breach_router.router,   prefix="/breach",   tags=["Breach Detection"])
 app.include_router(device_router.router,   prefix="/device",   tags=["Device Fingerprint"])
+app.include_router(query_router.router,    prefix="/query/nl", tags=["AI Query"])
 
 
 # ══════════════════════════════════════════════════════

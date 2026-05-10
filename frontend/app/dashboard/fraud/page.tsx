@@ -1,8 +1,18 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import { scoreFraud, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
+
+const DynAmtRisk = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.AmountRiskChart })),
+  { ssr: false }
+);
+const DynSignal = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.SignalContribChart })),
+  { ssr: false }
+);
 
 const IconCreditCard = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -93,6 +103,17 @@ export default function FraudPage() {
             </span>
           </div>
         )}
+      </div>
+
+      {/* ── Amount vs fraud risk reference ─────── */}
+      <div className="panel" style={{ padding: "18px 22px" }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 14 }}>
+          Transaction Amount vs Fraud Risk — Reference Curve
+        </div>
+        <DynAmtRisk currentAmount={form.amount} />
+        <div style={{ fontSize: 10, color: "var(--text-disabled)", marginTop: 6 }}>
+          White dot = current amount (${form.amount.toLocaleString()}) · Red line = 60% detection threshold
+        </div>
       </div>
 
       {/* Main grid */}
@@ -206,11 +227,25 @@ export default function FraudPage() {
                 }} />
               </div>
 
-              {/* Risk factors */}
+              {/* Rule contribution chart */}
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+                  Risk Factor Breakdown
+                </div>
+                <DynSignal factors={[
+                  { name: "Transaction Amount",   score: Math.min(1, form.amount / 10000),                                   color: "#ef4444" },
+                  { name: "International Txn",    score: form.is_international ? 0.70 : 0.02,                                color: "#f97316" },
+                  { name: "Off-hours (10pm–5am)", score: (form.hour >= 22 || form.hour <= 5) ? 0.55 : 0.05,                 color: "#8b5cf6" },
+                  { name: "Velocity (tx/hour)",   score: Math.min(1, form.tx_count_1h / 20),                                color: "#3d7fff" },
+                  { name: "Amount Ratio vs Avg",  score: Math.min(1, Math.max(0, (form.amount_ratio - 1) / 9)),             color: "#f59e0b" },
+                ]} />
+              </div>
+
+              {/* Risk factors text */}
               {result.risk_factors?.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>
-                    Risk Signals
+                    Triggered Rules
                   </div>
                   {result.risk_factors.map((f: string, i: number) => (
                     <div key={i} style={{ display: "flex", gap: 8, fontSize: 12, color: "var(--text-secondary)", alignItems: "flex-start" }}>

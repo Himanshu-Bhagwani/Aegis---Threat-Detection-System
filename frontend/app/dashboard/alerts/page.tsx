@@ -1,8 +1,18 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useProfiles } from "@/contexts/ProfileContext";
 import { riskColor, formatScore } from "@/lib/api";
 import { THRESHOLDS } from "@/lib/profiles";
+
+const DynAlertDonut = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.AlertSeverityChart })),
+  { ssr: false }
+);
+const DynThreshold = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.ThresholdChart })),
+  { ssr: false }
+);
 
 const IconBell = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -72,6 +82,32 @@ export default function AlertsPage() {
                 {highCount} High
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Charts row ──────────────────────────── */}
+      <div style={{ display: "grid", gridTemplateColumns: alerts.length > 0 ? "1fr 2fr" : "1fr", gap: 16 }}>
+
+        {/* Severity donut */}
+        <div className="panel" style={{ padding: "18px 22px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 14 }}>
+            Alert Distribution
+          </div>
+          <DynAlertDonut critical={criticalCount} high={highCount} />
+        </div>
+
+        {/* Threshold comparison */}
+        {alerts.length > 0 && (
+          <div className="panel" style={{ padding: "18px 22px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 14 }}>
+              Current Score vs Threshold — Triggered Alerts
+            </div>
+            <DynThreshold data={alerts.slice(0, 8).map(a => ({
+              name:      `${a.user_name.split(" ")[0]} · ${a.metric.replace(/ Risk$/, "").replace(/ Possibility$/, "")}`,
+              current:   Math.round(a.value * 100),
+              threshold: Math.round(a.threshold * 100),
+            }))} />
           </div>
         )}
       </div>

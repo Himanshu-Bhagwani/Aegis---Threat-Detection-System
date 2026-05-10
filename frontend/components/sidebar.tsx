@@ -47,6 +47,11 @@ const IconBell = () => (
     <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/>
   </svg>
 );
+const IconSearch = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+  </svg>
+);
 const IconLogOut = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
@@ -72,8 +77,12 @@ const NAV_DETECTION = [
   { href: "/dashboard/breach", icon: <IconShield />,     label: "Breach Check" },
 ];
 const NAV_MANAGEMENT = [
-  { href: "/dashboard/identity", icon: <IconUsers />, label: "Identity" },
-  { href: "/dashboard/alerts",   icon: <IconBell />,  label: "Alerts" },
+  { href: "/dashboard/identity", icon: <IconUsers />,  label: "Identity" },
+  { href: "/dashboard/alerts",   icon: <IconBell />,   label: "Alerts" },
+];
+
+const NAV_AI = [
+  { href: "/dashboard/query", icon: <IconSearch />, label: "AI Query" },
 ];
 
 export default function Sidebar() {
@@ -282,6 +291,20 @@ export default function Sidebar() {
 
         <div className="section-tag" style={{ marginTop: 12 }}>Management</div>
         {NAV_MANAGEMENT.map(n => <NavLink key={n.href} {...n} />)}
+
+        <div className="section-tag" style={{ marginTop: 12 }}>AI</div>
+        {NAV_AI.map(n => (
+          <a key={n.href} href={n.href} className={`nav-item ${pathname === n.href ? "active" : ""}`}>
+            <span style={{ flexShrink: 0, opacity: pathname === n.href ? 1 : 0.55, color: "var(--accent-purple)" }}>{n.icon}</span>
+            <span style={{ flex: 1 }}>{n.label}</span>
+            <span style={{
+              fontSize: 9, padding: "2px 6px", borderRadius: 5,
+              background: "rgba(139,92,246,0.15)", color: "var(--accent-purple)",
+              border: "1px solid rgba(139,92,246,0.3)", fontWeight: 800,
+              letterSpacing: "0.06em",
+            }}>LLM</span>
+          </a>
+        ))}
       </nav>
 
       {/* ── Footer ────────────────────────────────── */}

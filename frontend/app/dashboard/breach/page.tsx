@@ -1,8 +1,18 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import { checkPasswordBreach, checkEmailBreach, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
+
+const DynMiniBar = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.MiniModuleBar })),
+  { ssr: false }
+);
+const DynPwStrength = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.PasswordStrengthChart })),
+  { ssr: false }
+);
 
 const IconShield = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -36,7 +46,7 @@ const IconChevronRight = () => (
 );
 
 export default function BreachPage() {
-  const { selected, updateMetrics } = useProfiles();
+  const { selected, profiles, updateMetrics } = useProfiles();
   const [password, setPassword] = useState("");
   const [email,    setEmail]    = useState("");
   const [pwResult, setPwResult] = useState<any>(null);
@@ -125,6 +135,20 @@ export default function BreachPage() {
         </div>
       )}
 
+      {/* ── Breach risk across all profiles ────── */}
+      {profiles.length > 0 && (
+        <div className="panel" style={{ padding: "18px 22px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 14 }}>
+            Breach Exposure — All Profiles
+          </div>
+          <DynMiniBar data={profiles.map(p => ({
+            module: p.name.split(" ")[0],
+            score:  Math.round(p.metrics.breach_risk * 100),
+            color:  p.metrics.breach_risk >= 0.75 ? "#ef4444" : p.metrics.breach_risk >= 0.50 ? "#f97316" : p.metrics.breach_risk >= 0.25 ? "#f59e0b" : "#00ff88",
+          }))} />
+        </div>
+      )}
+
       {/* Two-column check panels */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
 
@@ -178,6 +202,21 @@ export default function BreachPage() {
                   <span style={{ fontWeight: 700, fontFamily: "var(--font-mono)", color: row.color ?? "var(--text-primary)" }}>{row.val}</span>
                 </div>
               ))}
+
+              {/* Password strength chart */}
+              {pwResult.entropy_bits != null && (
+                <div style={{ marginTop: 14, padding: "14px 16px", borderRadius: 10, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+                    Strength Breakdown
+                  </div>
+                  <DynPwStrength data={{
+                    entropy:      pwResult.entropy_bits ?? 0,
+                    length_score: Math.min(1, (pwResult.length ?? 0) / 20),
+                    diversity:    pwResult.char_diversity ?? (pwResult.strength_score ?? 0.5),
+                    uniqueness:   pwResult.pwned_count === 0 ? 0.95 : 0.05,
+                  }} />
+                </div>
+              )}
 
               {/* Recommendations */}
               <div style={{ marginTop: 14, padding: "14px 16px", borderRadius: 10, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}>
