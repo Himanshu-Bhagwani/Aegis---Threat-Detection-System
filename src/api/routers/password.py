@@ -4,7 +4,7 @@ Password Risk Assessment API Router
 Endpoints for evaluating password strength and breach risk.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr
 from typing import List, Dict, Optional
 
@@ -114,62 +114,54 @@ def generate_recommendations(features: Dict, prob: float) -> List[str]:
 
 
 @router.post("/score", response_model=PasswordScoreResponse, summary="Score password strength and breach risk")
-async def score_password(request: PasswordScoreRequest):
+async def score_password(body: PasswordScoreRequest, request: Request):
     """
     Evaluate a password for strength and breach risk.
-    
-    The endpoint uses an ML model trained to identify weak/breached passwords
-    based on features like:
-    - Length and character diversity
-    - Presence of sequential patterns
-    - Character type distribution
-    - Entropy estimation
-    
+
     Returns a breach probability score [0-1] where higher values indicate
     higher likelihood the password is weak or has been breached.
-    
-    **Privacy Note**: Passwords are not stored or logged. For additional
-    privacy, use the /score/hash endpoint with k-anonymity.
+
+    **Privacy Note**: Passwords are not stored or logged.
     """
     try:
         score_fn, features_fn = get_score_function()
-        
-        password = request.password
-        
-        # Get breach probability from ML model
+
+        password    = body.password
         breach_prob = score_fn(password)
-        
-        # Get feature breakdown
-        features = features_fn["to_features"](password)
-        entropy = features_fn["entropy"](password)
-        
-        # Calculate strength score (inverse of breach probability, adjusted)
-        strength = 1.0 - (breach_prob * 0.7)  # Breach accounts for 70%
+        features    = features_fn["to_features"](password)
+        entropy     = features_fn["entropy"](password)
+
+        strength = 1.0 - (breach_prob * 0.7)
         if features["length"] >= 16:
             strength = min(strength + 0.1, 1.0)
         if features["unique_chars"] >= 10:
             strength = min(strength + 0.05, 1.0)
-        
-        # Get risk level
-        risk_level = get_risk_level(breach_prob)
-        
-        # Generate recommendations
+
+        risk_level      = get_risk_level(breach_prob)
         recommendations = generate_recommendations(features, breach_prob)
-        
+
+        try:
+            broadcast = getattr(request.app.state, "broadcast", None)
+            if broadcast:
+                await broadcast("password_score", "anonymous", {
+                    "breach_probability": breach_prob,
+                    "risk_level":        risk_level,
+                    "strength_score":    strength,
+                })
+        except Exception:
+            pass
+
         return PasswordScoreResponse(
             breach_probability=breach_prob,
             strength_score=strength,
             risk_level=risk_level,
             features=features,
             recommendations=recommendations,
-            entropy_bits=entropy
+            entropy_bits=entropy,
         )
-        
+
     except FileNotFoundError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Password scoring model not available: {str(e)}"
-        )
+        raise HTTPException(status_code=503, detail=f"Password scoring model not available: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 

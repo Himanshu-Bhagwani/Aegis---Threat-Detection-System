@@ -13,6 +13,7 @@ const NAV_DETECTION = [
   { href: "/dashboard/login",  icon: "◐", label: "Login Events"          },
   { href: "/dashboard/fraud",  icon: "◆", label: "Fraud Possibility"     },
   { href: "/dashboard/breach", icon: "◑", label: "Breach Check"          },
+  { href: "/dashboard/device", icon: "◫", label: "Device Fingerprint"    },
 ];
 const NAV_MANAGEMENT = [
   { href: "/dashboard/identity", icon: "◎", label: "Identity"  },

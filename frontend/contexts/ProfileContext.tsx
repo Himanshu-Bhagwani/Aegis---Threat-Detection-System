@@ -58,6 +58,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
         if (d.password_risk != null) partial.password_leak  = d.password_risk;
         if (d.fraud_risk    != null) partial.fraud_risk     = d.fraud_risk;
         if (d.breach_risk   != null) partial.breach_risk    = d.breach_risk;
+        // Accept the backend's weighted unified_score directly instead of recalculating locally
+        if (d.unified_score != null) partial.unified_score  = d.unified_score;
         return updateProfileMetrics(prev, evt.user_id!, partial as any);
       });
     });

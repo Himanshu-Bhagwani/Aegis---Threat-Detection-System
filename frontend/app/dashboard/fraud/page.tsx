@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { scoreFraud, riskColor, formatScore } from "@/lib/api";
+import { scoreFraud, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
 
 export default function FraudPage() {
@@ -16,8 +16,10 @@ export default function FraudPage() {
       const res = await scoreFraud({ ...form, merchant_freq_user: 3 });
       setResult(res);
       if (res?.fraud_probability != null && selected) {
-        const newVal = selected.metrics.fraud_risk * 0.7 + res.fraud_probability * 0.3;
-        updateMetrics(selected.id, { fraud_risk: Math.min(1, Math.max(0, newVal)) });
+        const newFraud = Math.min(1, Math.max(0, selected.metrics.fraud_risk * 0.7 + res.fraud_probability * 0.3));
+        const m = selected.metrics;
+        const unified = await getWeightedUnifiedScore(m.gps_spoof, m.login_anomaly, m.password_leak, newFraud, m.breach_risk, selected.id);
+        updateMetrics(selected.id, { fraud_risk: newFraud, unified_score: unified });
         setUpdated(true);
       }
     } catch (e: any) { setResult({ error: e?.message }); }

@@ -4,7 +4,7 @@ Login Anomaly Detection API Router
 Endpoints for detecting anomalous login patterns.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
 
@@ -82,7 +82,7 @@ def get_score_function():
 
 
 @router.post("/score", response_model=LoginAnomalyResponse, summary="Score login event for anomalies")
-async def score_login(request: LoginEventRequest):
+async def score_login(body: LoginEventRequest, request: Request):
     """
     Analyze a login event for potential anomalies.
     
@@ -97,14 +97,11 @@ async def score_login(request: LoginEventRequest):
     """
     try:
         score_fn = get_score_function()
-        
-        # Convert to dict for scoring function
-        event_dict = request.model_dump(exclude_none=True)
-        
-        # Score the event
+
+        event_dict = body.model_dump(exclude_none=True)
         result = score_fn["single"](event_dict)
-        
-        return LoginAnomalyResponse(
+
+        response = LoginAnomalyResponse(
             anomaly_probability=result["anomaly_probability"],
             is_anomalous=result["is_anomalous"],
             risk_level=result["risk_level"],
@@ -112,10 +109,25 @@ async def score_login(request: LoginEventRequest):
             model_scores=result["model_scores"],
             rule_scores=result.get("rule_scores", {}),
             models_used=result.get("models_used", []),
-            user_id=request.user_id,
-            session_id=request.session_id
+            user_id=body.user_id,
+            session_id=body.session_id,
         )
-        
+
+        try:
+            broadcast = getattr(request.app.state, "broadcast", None)
+            if broadcast:
+                uid = body.user_id or "anonymous"
+                await broadcast("login_score", uid, {
+                    "anomaly_probability": result["anomaly_probability"],
+                    "risk_level":         result["risk_level"],
+                    "confidence":         result["confidence"],
+                    "user_id":            body.user_id,
+                })
+        except Exception:
+            pass
+
+        return response
+
     except FileNotFoundError as e:
         raise HTTPException(
             status_code=503,
@@ -136,7 +148,6 @@ async def score_login_batch(request: BatchLoginRequest):
     try:
         score_fn = get_score_function()
         
-        # Convert to list of dicts
         events = [event.model_dump(exclude_none=True) for event in request.events]
         
         # Score batch

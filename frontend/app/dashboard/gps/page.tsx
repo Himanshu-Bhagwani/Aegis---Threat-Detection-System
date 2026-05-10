@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { scoreGPS, riskColor, formatScore } from "@/lib/api";
+import { scoreGPS, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
 
 const now = Date.now();
@@ -54,9 +54,12 @@ export default function GpsPage() {
     try {
       const res = await scoreGPS(traj, selected?.id);
       setResult(res);
-      if (res?.risk_score != null && selected) {
-        const newVal = selected.metrics.gps_spoof * 0.7 + res.risk_score * 0.3;
-        updateMetrics(selected.id, { gps_spoof: Math.min(1, Math.max(0, newVal)) });
+      const spoof = res?.spoof_probability ?? res?.risk_score;
+      if (spoof != null && selected) {
+        const newGps = Math.min(1, Math.max(0, selected.metrics.gps_spoof * 0.7 + spoof * 0.3));
+        const m = selected.metrics;
+        const unified = await getWeightedUnifiedScore(newGps, m.login_anomaly, m.password_leak, m.fraud_risk, m.breach_risk, selected.id);
+        updateMetrics(selected.id, { gps_spoof: newGps, unified_score: unified });
         setUpdated(true);
       }
     } catch (e: any) { setResult({ error: e?.message }); }

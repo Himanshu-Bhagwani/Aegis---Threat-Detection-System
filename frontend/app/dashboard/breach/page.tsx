@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { checkPasswordBreach, checkEmailBreach, riskColor, formatScore } from "@/lib/api";
+import { checkPasswordBreach, checkEmailBreach, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
 
 export default function BreachPage() {
@@ -19,9 +19,11 @@ export default function BreachPage() {
       const res = await checkPasswordBreach(password);
       setPwResult(res);
       if (res?.breach_probability != null && selected) {
-        const newVal = selected.metrics.breach_risk * 0.7 + res.breach_probability * 0.3;
-        updateMetrics(selected.id, { breach_risk: Math.min(1, Math.max(0, newVal)) });
-        setUpdated(`Updated ${selected.name}'s breach risk to ${(Math.min(1, Math.max(0, newVal)) * 100).toFixed(0)}%`);
+        const newBreach = Math.min(1, Math.max(0, selected.metrics.breach_risk * 0.7 + res.breach_probability * 0.3));
+        const m = selected.metrics;
+        const unified = await getWeightedUnifiedScore(m.gps_spoof, m.login_anomaly, m.password_leak, m.fraud_risk, newBreach, selected.id);
+        updateMetrics(selected.id, { breach_risk: newBreach, unified_score: unified });
+        setUpdated(`Updated ${selected.name}'s breach risk to ${(newBreach * 100).toFixed(0)}%`);
       }
     } catch (e: any) { setPwResult({ error: e?.message }); }
     finally { setLoading(null); }
@@ -33,13 +35,14 @@ export default function BreachPage() {
     try {
       const res = await checkEmailBreach(email);
       setEmResult(res);
-      // derive a breach probability from breach_count
       if (selected) {
         const count = res?.breach_count ?? 0;
         const inferredRisk = Math.min(1, count * 0.15);
-        const newVal = selected.metrics.breach_risk * 0.7 + inferredRisk * 0.3;
-        updateMetrics(selected.id, { breach_risk: Math.min(1, Math.max(0, newVal)) });
-        setUpdated(`Updated ${selected.name}'s breach risk to ${(Math.min(1, Math.max(0, newVal)) * 100).toFixed(0)}%`);
+        const newBreach = Math.min(1, Math.max(0, selected.metrics.breach_risk * 0.7 + inferredRisk * 0.3));
+        const m = selected.metrics;
+        const unified = await getWeightedUnifiedScore(m.gps_spoof, m.login_anomaly, m.password_leak, m.fraud_risk, newBreach, selected.id);
+        updateMetrics(selected.id, { breach_risk: newBreach, unified_score: unified });
+        setUpdated(`Updated ${selected.name}'s breach risk to ${(newBreach * 100).toFixed(0)}%`);
       }
     } catch (e: any) { setEmResult({ error: e?.message }); }
     finally { setLoading(null); }

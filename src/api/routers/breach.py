@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.breach.hibp_checker import score_password_breach, check_email_breach, check_password_hash
@@ -39,7 +39,7 @@ class EmailBreachRequest(BaseModel):
 
 
 @router.post("/check/password", summary="Check password against known data breaches")
-async def check_password_breach_endpoint(body: PasswordBreachRequest):
+async def check_password_breach_endpoint(body: PasswordBreachRequest, request: Request):
     """
     Uses HIBP k-anonymity API to check if a password has appeared in data breaches.
     Only the first 5 characters of the SHA-1 hash are sent to HIBP — the full
@@ -69,6 +69,19 @@ async def check_password_breach_endpoint(body: PasswordBreachRequest):
                 "risk_level":        result["risk_level"],
             },
         )
+
+    try:
+        broadcast = getattr(request.app.state, "broadcast", None)
+        if broadcast:
+            uid = body.user_id or "anonymous"
+            await broadcast("breach_score", uid, {
+                "breach_probability": result["breach_probability"],
+                "risk_level":        result["risk_level"],
+                "is_pwned":          result["is_pwned"],
+                "user_id":           body.user_id,
+            })
+    except Exception:
+        pass
 
     return {
         **result,

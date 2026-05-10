@@ -284,7 +284,7 @@ async def login_legacy(body: SignInRequest):
 @app.get("/identity/{user_id}", tags=["Identity"])
 async def get_identity_profile(
     user_id: str,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ):
     """Fetch a user's behavioral profile and recent event history from DynamoDB."""
     profile = dynamo_get_user_profile(user_id)
@@ -302,7 +302,7 @@ async def get_user_events(
     user_id:    str,
     limit:      int = 50,
     event_type: Optional[str] = None,
-    user: dict  = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ):
     """Fetch paginated detection event history for a user."""
     events = dynamo_get_user_events(user_id, limit=limit, event_type=event_type)
@@ -314,7 +314,7 @@ async def get_user_events(
 # ══════════════════════════════════════════════════════
 
 @app.get("/alerts", tags=["Alerts"])
-async def get_alerts(limit: int = 20, user: dict = Depends(require_auth)):
+async def get_alerts(limit: int = 20, user: Optional[dict] = Depends(optional_auth)):
     """Fetch recent security alerts for the dashboard."""
     alerts = dynamo_get_recent_alerts(limit=limit)
     return {"alerts": alerts, "count": len(alerts)}

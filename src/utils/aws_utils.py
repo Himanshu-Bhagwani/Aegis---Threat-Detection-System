@@ -157,9 +157,10 @@ def cognito_sign_up(
             "confirmed": resp.get("UserConfirmed", False),
             "message":   "Registration successful. Check your email for the verification code.",
         }
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg  = e.response["Error"]["Message"]
+    except (ClientError, NoCredentialsError) as e:
+        err  = getattr(e, "response", {}).get("Error", {})
+        code = err.get("Code", type(e).__name__)
+        msg  = err.get("Message", str(e))
         logger.error("Cognito sign_up error: %s — %s", code, msg)
         return {"success": False, "error": code, "message": msg}
 
@@ -213,14 +214,13 @@ def cognito_sign_in(email: str, password: str) -> Dict:
             "expires_in":    result.get("ExpiresIn", 3600),
             "token_type":    result.get("TokenType", "Bearer"),
         }
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg  = e.response["Error"]["Message"]
+    except (ClientError, NoCredentialsError) as e:
+        err  = getattr(e, "response", {}).get("Error", {})
+        code = err.get("Code", type(e).__name__)
+        msg  = err.get("Message", str(e))
         logger.error("Cognito sign_in error: %s — %s", code, msg)
-        # When Cognito pool/client is misconfigured (placeholder creds),
-        # fall back to mock mode so the UI remains functional
         if code in ("ResourceNotFoundException", "UnrecognizedClientException",
-                    "InvalidClientTokenId", "InvalidParameterException"):
+                    "InvalidClientTokenId", "InvalidParameterException", "NoCredentialsError"):
             logger.warning("Cognito not reachable — returning mock sign-in response")
             return _mock_signin_response(email)
         return {"success": False, "error": code, "message": msg}
@@ -255,8 +255,8 @@ def cognito_verify_token(access_token: str) -> Dict:
             "email":    attrs.get("email", ""),
             "username": resp["Username"],
         }
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
+    except (ClientError, NoCredentialsError) as e:
+        code = getattr(e, "response", {}).get("Error", {}).get("Code", str(e))
         logger.warning("Cognito token validation failed: %s", code)
         return {"valid": False, "error": code}
 
@@ -269,8 +269,8 @@ def cognito_sign_out(access_token: str) -> bool:
     try:
         client.global_sign_out(AccessToken=access_token)
         return True
-    except ClientError as e:
-        logger.warning("Cognito sign_out error: %s", e.response["Error"]["Code"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.warning("Cognito sign_out error: %s", str(e))
         return False
 
 
@@ -292,8 +292,8 @@ def cognito_get_user_profile(username: str) -> Dict:
             "given_name": attrs.get("given_name", ""),
             "sub":        attrs.get("sub", ""),
         }
-    except ClientError as e:
-        logger.warning("cognito_get_user_profile: %s", e.response["Error"]["Code"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.warning("cognito_get_user_profile: %s", str(e))
         return {}
 
 
@@ -325,8 +325,8 @@ def s3_download_model(s3_key: str, local_path: str, bucket: str = S3_MODELS_BUCK
         client.download_file(bucket, s3_key, local_path)
         logger.info("Downloaded s3://%s/%s → %s", bucket, s3_key, local_path)
         return True
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
+    except (ClientError, NoCredentialsError) as e:
+        code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
         if code == "404":
             logger.warning("Model not found in S3: %s", s3_key)
         else:
@@ -342,7 +342,7 @@ def s3_model_exists(s3_key: str, bucket: str = S3_MODELS_BUCKET) -> bool:
     try:
         client.head_object(Bucket=bucket, Key=s3_key)
         return True
-    except ClientError:
+    except (ClientError, NoCredentialsError):
         return False
 
 
@@ -359,7 +359,7 @@ def s3_upload_bytes(
     try:
         client.put_object(Bucket=bucket, Key=s3_key, Body=data, ContentType=content_type)
         return True
-    except ClientError as e:
+    except (ClientError, NoCredentialsError) as e:
         logger.error("S3 put_object failed: %s", e)
         return False
 
@@ -372,7 +372,7 @@ def s3_list_models(prefix: str = "", bucket: str = S3_MODELS_BUCKET) -> List[str
     try:
         resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix)
         return [obj["Key"] for obj in resp.get("Contents", [])]
-    except ClientError as e:
+    except (ClientError, NoCredentialsError) as e:
         logger.error("S3 list_objects failed: %s", e)
         return []
 
@@ -464,8 +464,8 @@ def dynamo_put_event(
         table.put_item(Item=item)
         logger.info("Event persisted: %s / %s", user_id, event_id)
         return event_id
-    except ClientError as e:
-        logger.error("DynamoDB put_event failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB put_event failed: %s", str(e))
         return None
 
 
@@ -493,8 +493,8 @@ def dynamo_get_user_events(
             kwargs["FilterExpression"] = Attr("event_type").eq(event_type)
         resp = table.query(**kwargs)
         return [_from_decimal(item) for item in resp.get("Items", [])]
-    except ClientError as e:
-        logger.error("DynamoDB query failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB query failed: %s", str(e))
         return []
 
 
@@ -520,8 +520,8 @@ def dynamo_update_user_profile(
         table = resource.Table(table_name)
         table.put_item(Item=profile_data)
         return True
-    except ClientError as e:
-        logger.error("DynamoDB profile update failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB profile update failed: %s", str(e))
         return False
 
 
@@ -538,8 +538,8 @@ def dynamo_get_user_profile(
         resp  = table.get_item(Key={"user_id": user_id})
         item  = resp.get("Item")
         return _from_decimal(item) if item else None
-    except ClientError as e:
-        logger.error("DynamoDB get_profile failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB get_profile failed: %s", str(e))
         return None
 
 
@@ -573,8 +573,8 @@ def dynamo_put_alert(
         table = resource.Table(table_name)
         table.put_item(Item=item)
         return alert_id
-    except ClientError as e:
-        logger.error("DynamoDB put_alert failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB put_alert failed: %s", str(e))
         return None
 
 
@@ -595,8 +595,8 @@ def dynamo_get_recent_alerts(
             reverse=True,
         )
         return items[:limit]
-    except ClientError as e:
-        logger.error("DynamoDB scan alerts failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB scan alerts failed: %s", str(e))
         return []
 
 
@@ -617,8 +617,8 @@ def dynamo_dismiss_alert(alert_id: str, table_name: str = DYNAMODB_ALERTS_TABLE)
             },
         )
         return True
-    except ClientError as e:
-        logger.error("DynamoDB dismiss_alert failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB dismiss_alert failed: %s", str(e))
         return False
 
 
@@ -660,8 +660,8 @@ def cw_put_metric(
     except NoCredentialsError:
         logger.debug("CloudWatch put_metric skipped: no AWS credentials")
         return False
-    except ClientError as e:
-        logger.warning("CloudWatch put_metric failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.warning("CloudWatch put_metric failed: %s", str(e))
         return False
 
 
@@ -696,7 +696,7 @@ def cw_log_event(log_group: str, log_stream: str, message: str) -> bool:
     try:
         try:
             client.create_log_stream(logGroupName=log_group, logStreamName=log_stream)
-        except ClientError:
+        except (ClientError, NoCredentialsError):
             pass  # Already exists — ignore
         client.put_log_events(
             logGroupName=log_group,
@@ -704,8 +704,8 @@ def cw_log_event(log_group: str, log_stream: str, message: str) -> bool:
             logEvents=[{"timestamp": int(time.time() * 1000), "message": message}],
         )
         return True
-    except ClientError as e:
-        logger.warning("CloudWatch log failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.warning("CloudWatch log failed: %s", str(e))
         return False
 
 
@@ -746,8 +746,8 @@ def sns_publish_alert(
         )
         logger.info("SNS alert sent: %s / MessageId=%s", subject, resp["MessageId"])
         return resp["MessageId"]
-    except ClientError as e:
-        logger.error("SNS publish failed: %s", e.response["Error"]["Message"])
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("SNS publish failed: %s", str(e))
         return None
 
 
@@ -816,8 +816,8 @@ def get_secret(secret_name: str, default: Optional[str] = None) -> Optional[str]
     try:
         resp = client.get_secret_value(SecretId=secret_name)
         return resp.get("SecretString", default)
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
+    except (ClientError, NoCredentialsError) as e:
+        code = getattr(e, "response", {}).get("Error", {}).get("Code", str(e))
         logger.warning("Secrets Manager get_secret (%s): %s", secret_name, code)
         return default
 

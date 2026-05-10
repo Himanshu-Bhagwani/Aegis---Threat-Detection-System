@@ -167,10 +167,12 @@ export interface UnifiedRiskInput {
   user_id?: string;
   event_id?: string;
   gps_data?: { spoof_probability?: number; confidence?: number; trajectory?: GPSPoint[] };
-  login_data?: LoginEventInput & { anomaly_probability?: number };
+  login_data?: LoginEventInput & { anomaly_probability?: number; confidence?: number };
   password?: string;
   password_score?: number;
   transaction_data?: { fraud_probability?: number; amount?: number; is_international?: boolean };
+  breach_data?: { breach_probability?: number; confidence?: number };
+  device_data?: { device_risk_score?: number; confidence?: number };
   fusion_strategy?: "weighted_average" | "max_threat" | "bayesian";
 }
 export interface UnifiedRiskResponse {
@@ -188,6 +190,39 @@ export interface UnifiedRiskResponse {
 }
 export async function computeUnifiedRisk(data: UnifiedRiskInput) {
   return apiFetch("/risk/unified", { method: "POST", body: JSON.stringify(data) });
+}
+
+/**
+ * Call /risk/unified with pre-computed component scores and return the
+ * backend's weighted unified_score.  Falls back to local weighted average
+ * if the backend is unreachable so the UI never shows a stale value.
+ */
+export async function getWeightedUnifiedScore(
+  gps_spoof:     number,
+  login_anomaly: number,
+  password_leak: number,
+  fraud_risk:    number,
+  breach_risk:   number,
+  userId?:       string,
+): Promise<number> {
+  try {
+    const result = await computeUnifiedRisk({
+      user_id:          userId,
+      gps_data:         { spoof_probability: gps_spoof,    confidence: 0.8 },
+      login_data:       { anomaly_probability: login_anomaly, confidence: 0.8 },
+      password_score:   password_leak,
+      transaction_data: { fraud_probability: fraud_risk },
+      breach_data:      { breach_probability: breach_risk, confidence: 0.8 },
+      fusion_strategy:  "weighted_average",
+    });
+    return result.unified_score ?? localWeighted(gps_spoof, login_anomaly, password_leak, fraud_risk, breach_risk);
+  } catch {
+    return localWeighted(gps_spoof, login_anomaly, password_leak, fraud_risk, breach_risk);
+  }
+}
+
+function localWeighted(g: number, l: number, p: number, f: number, b: number): number {
+  return (g * 1.5 + l * 2.0 + p * 1.0 + f * 2.5 + b * 1.8) / 8.8;
 }
 
 // ═══════════════════════════════════════════════════════

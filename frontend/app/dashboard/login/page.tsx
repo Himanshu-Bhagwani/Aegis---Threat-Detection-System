@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { scoreLogin, riskColor, formatScore } from "@/lib/api";
+import { scoreLogin, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
 
 export default function LoginPage() {
@@ -17,8 +17,10 @@ export default function LoginPage() {
       const res = await scoreLogin(form);
       setResult(res);
       if (res?.anomaly_probability != null && selected) {
-        const newVal = selected.metrics.login_anomaly * 0.7 + res.anomaly_probability * 0.3;
-        updateMetrics(selected.id, { login_anomaly: Math.min(1, Math.max(0, newVal)) });
+        const newLogin = Math.min(1, Math.max(0, selected.metrics.login_anomaly * 0.7 + res.anomaly_probability * 0.3));
+        const m = selected.metrics;
+        const unified = await getWeightedUnifiedScore(m.gps_spoof, newLogin, m.password_leak, m.fraud_risk, m.breach_risk, selected.id);
+        updateMetrics(selected.id, { login_anomaly: newLogin, unified_score: unified });
         setUpdated(true);
       }
     } catch (e: any) { setResult({ error: e?.message }); }

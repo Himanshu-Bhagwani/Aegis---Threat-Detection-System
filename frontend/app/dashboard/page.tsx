@@ -24,6 +24,18 @@ const DEMO_PINGS: GlobePing[] = [
   { lat: -23.5, lon: -46.6, risk: "low",      label: "São Paulo" },
 ];
 
+// Pool of city coordinates to rotate through for live event pings
+const PING_POOL: Omit<GlobePing, "risk">[] = [
+  { lat: 37.8, lon: -122.4, label: "San Francisco" },
+  { lat: 41.9, lon:   12.5, label: "Rome"          },
+  { lat: 39.9, lon:  116.4, label: "Beijing"       },
+  { lat: 19.1, lon:  -99.1, label: "Mexico City"   },
+  { lat: 52.5, lon:   13.4, label: "Berlin"        },
+  { lat: -34.6, lon: -58.4, label: "Buenos Aires"  },
+  { lat:  1.35, lon: 103.8, label: "Singapore"     },
+  { lat: 55.7, lon:   37.6, label: "Moscow"        },
+];
+
 const MODULE_KEYS = [
   { key: "gps_spoof",     label: "GPS Spoofing",            icon: "◉" },
   { key: "login_anomaly", label: "Login Anomaly",           icon: "◐" },
@@ -46,12 +58,25 @@ export default function DashboardPage() {
   const [wsConnected, setWsConnected] = useState(false);
   const [globePings,  setGlobePings]  = useState<GlobePing[]>(DEMO_PINGS);
   const [liveCount,   setLiveCount]   = useState(0);
+  const pingIdxRef = useRef(0);
 
   useEffect(() => {
     wsClient.connect();
     const unsub = wsClient.subscribe((evt: WSEvent) => {
       if (evt.type === "connected") { setWsConnected(true); return; }
-      if (evt.type === "detection_event") setLiveCount(n => n + 1);
+      if (evt.type === "detection_event") {
+        setLiveCount(n => n + 1);
+        // Add a live globe ping so detection events appear as threat pings on the globe
+        const riskLvl = (evt.risk_level as RiskLevel) || (
+          (evt.risk_score ?? 0) >= 0.75 ? "critical" :
+          (evt.risk_score ?? 0) >= 0.50 ? "high" :
+          (evt.risk_score ?? 0) >= 0.25 ? "medium" : "low"
+        );
+        const loc = PING_POOL[pingIdxRef.current % PING_POOL.length];
+        pingIdxRef.current += 1;
+        const label = evt.event_type ? evt.event_type.replace("_", " ") : loc.label;
+        setGlobePings(prev => [...prev.slice(-19), { ...loc, risk: riskLvl, label }]);
+      }
     });
     return () => { unsub(); };
   }, []);

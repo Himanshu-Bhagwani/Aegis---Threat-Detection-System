@@ -83,3 +83,4 @@ ageis-dead3-firebase-adminsdk-fbsvc-589b74d7f8.json
 notebooks/*.ipynb
 
 .claude/
+.pytest_cache/

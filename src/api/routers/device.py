@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.device.device_risk_model import score_device_risk, generate_device_id
@@ -79,7 +79,7 @@ class DeviceRegisterRequest(BaseModel):
 
 
 @router.post("/score", summary="Score device fingerprint risk")
-async def score_device(body: DeviceScoreRequest):
+async def score_device(body: DeviceScoreRequest, request: Request):
     """
     Score the risk of a device interaction.
 
@@ -142,6 +142,18 @@ async def score_device(body: DeviceScoreRequest):
             "app_unlock_attempted":   body.app_unlock_attempted,
         },
     )
+
+    try:
+        broadcast = getattr(request.app.state, "broadcast", None)
+        if broadcast:
+            await broadcast("device_score", body.user_id, {
+                "device_risk_score": result["device_risk_score"],
+                "risk_level":        result["risk_level"],
+                "is_new_device":     result["is_new_device"],
+                "user_id":           body.user_id,
+            })
+    except Exception:
+        pass
 
     return {
         **result,

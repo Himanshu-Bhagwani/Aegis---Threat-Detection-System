@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 import json, joblib, os, numpy as np
 from pathlib import Path
@@ -141,16 +141,15 @@ def score_fraud_rule_based(payload: Dict[str, Any]) -> float:
 
 
 @router.post("/score")
-def score_txn(body: Transaction):
+async def score_txn(body: Transaction, request: Request):
     """
     Score a transaction for fraud probability.
-    
+
     Uses ML model if available, otherwise falls back to rule-based scoring.
     """
     try:
         model, scaler, features = load_artifacts()
-        
-        # If ML model available, use it
+
         if model is not None and scaler is not None and features is not None:
             try:
                 import xgboost as xgb
@@ -158,29 +157,24 @@ def score_txn(body: Transaction):
                 Xs = scaler.transform(X)
                 dmat = xgb.DMatrix(Xs)
                 prob = model.predict(dmat)[0]
-                return {
-                    "fraud_probability": float(prob),
-                    "method": "ml_model",
-                    "confidence": 0.85
-                }
+                result = {"fraud_probability": float(prob), "method": "ml_model", "confidence": 0.85}
             except Exception as e:
                 print(f"Warning: ML model prediction failed: {e}. Falling back to rule-based.")
-                # Fall through to rule-based
-        
-        # Use rule-based fallback
-        prob = score_fraud_rule_based(body.payload)
-        return {
-            "fraud_probability": prob,
-            "method": "rule_based",
-            "confidence": 0.6
-        }
-        
+                prob = score_fraud_rule_based(body.payload)
+                result = {"fraud_probability": prob, "method": "rule_based", "confidence": 0.6}
+        else:
+            prob = score_fraud_rule_based(body.payload)
+            result = {"fraud_probability": prob, "method": "rule_based", "confidence": 0.6}
+
     except Exception as e:
-        # Final fallback if everything fails
         print(f"Error in fraud scoring: {e}")
-        return {
-            "fraud_probability": 0.5,  # Neutral score
-            "method": "fallback",
-            "confidence": 0.0,
-            "error": str(e)
-        }
+        result = {"fraud_probability": 0.5, "method": "fallback", "confidence": 0.0, "error": str(e)}
+
+    try:
+        broadcast = getattr(request.app.state, "broadcast", None)
+        if broadcast:
+            await broadcast("fraud_score", "anonymous", result)
+    except Exception:
+        pass
+
+    return result

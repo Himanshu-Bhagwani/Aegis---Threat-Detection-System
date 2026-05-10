@@ -63,7 +63,16 @@ export function scoreToLevel(s: number): string {
 }
 
 export function computeUnified(m: Pick<ProfileMetrics, "gps_spoof"|"login_anomaly"|"password_leak"|"fraud_risk"|"breach_risk">): number {
-  return (m.gps_spoof + m.login_anomaly + m.password_leak + m.fraud_risk + m.breach_risk) / 5;
+  // Weights match the backend fusion engine (src/fusion/risk_scoring.py)
+  const W_GPS = 1.5, W_LOGIN = 2.0, W_PW = 1.0, W_FRAUD = 2.5, W_BREACH = 1.8;
+  const total = W_GPS + W_LOGIN + W_PW + W_FRAUD + W_BREACH; // 8.8
+  return (
+    m.gps_spoof    * W_GPS   +
+    m.login_anomaly * W_LOGIN +
+    m.password_leak * W_PW   +
+    m.fraud_risk    * W_FRAUD +
+    m.breach_risk   * W_BREACH
+  ) / total;
 }
 
 const NOW = new Date().toISOString();
@@ -150,12 +159,13 @@ export function addProfile(profiles: Profile[], name: string, email: string): Pr
 export function updateProfileMetrics(
   profiles: Profile[],
   id: string,
-  partial: Partial<Pick<ProfileMetrics, "gps_spoof"|"login_anomaly"|"password_leak"|"fraud_risk"|"breach_risk">>
+  partial: Partial<Pick<ProfileMetrics, "gps_spoof"|"login_anomaly"|"password_leak"|"fraud_risk"|"breach_risk"|"unified_score">>
 ): Profile[] {
   const updated = profiles.map(p => {
     if (p.id !== id) return p;
     const m = { ...p.metrics, ...partial };
-    const unified = computeUnified(m);
+    // Use backend-provided unified_score when available; otherwise recompute locally with correct weights
+    const unified = partial.unified_score != null ? partial.unified_score : computeUnified(m);
     return { ...p, metrics: { ...m, unified_score: unified, risk_level: scoreToLevel(unified), last_updated: new Date().toISOString() } };
   });
   saveProfiles(updated);
