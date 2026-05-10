@@ -48,9 +48,9 @@ COGNITO_CLIENT_SECRET = os.getenv("COGNITO_CLIENT_SECRET", "")
 S3_MODELS_BUCKET      = os.getenv("S3_MODELS_BUCKET", "aegis-ml-models")
 S3_LOGS_BUCKET        = os.getenv("S3_LOGS_BUCKET", "aegis-event-logs")
 
-DYNAMODB_EVENTS_TABLE   = os.getenv("DYNAMODB_EVENTS_TABLE", "aegis-events")
-DYNAMODB_PROFILES_TABLE = os.getenv("DYNAMODB_PROFILES_TABLE", "aegis-user-profiles")
-DYNAMODB_ALERTS_TABLE   = os.getenv("DYNAMODB_ALERTS_TABLE", "aegis-alerts")
+DYNAMODB_EVENTS_TABLE   = os.getenv("DYNAMODB_EVENTS_TABLE", "Apeilo-events")
+DYNAMODB_PROFILES_TABLE = os.getenv("DYNAMODB_PROFILES_TABLE", "apeilo-users-profile")
+DYNAMODB_ALERTS_TABLE   = os.getenv("DYNAMODB_ALERTS_TABLE", "Apeilo-alerts")
 
 CLOUDWATCH_NAMESPACE  = os.getenv("CLOUDWATCH_NAMESPACE", "AEGIS/ThreatDetection")
 SNS_ALERTS_TOPIC_ARN  = os.getenv("SNS_ALERTS_TOPIC_ARN", "")
@@ -447,10 +447,13 @@ def dynamo_put_event(
     timestamp = now.isoformat()
     ttl       = int(now.timestamp()) + (90 * 86400)
 
+    # Sort key in DynamoDB table is `event_id`. Prefix with timestamp so the
+    # natural string ordering of event_id reflects chronological order.
+    sortable_event_id = f"{timestamp}#{event_id}"
     item: Dict[str, Any] = {
         "user_id":    user_id,
-        "sk":         f"{timestamp}#{event_id}",
-        "event_id":   event_id,
+        "event_id":   sortable_event_id,
+        "event_uuid": event_id,
         "event_type": event_type,
         "timestamp":  timestamp,
         "scores":     _to_decimal(scores),
@@ -600,15 +603,31 @@ def dynamo_get_recent_alerts(
         return []
 
 
-def dynamo_dismiss_alert(alert_id: str, table_name: str = DYNAMODB_ALERTS_TABLE) -> bool:
-    """Mark an alert as dismissed."""
+def dynamo_dismiss_alert(
+    alert_id: str,
+    user_id: Optional[str] = None,
+    table_name: str = DYNAMODB_ALERTS_TABLE,
+) -> bool:
+    """Mark an alert as dismissed. Requires user_id since it's the partition key."""
     resource = get_resource("dynamodb")
     if not resource:
         return False
     try:
         table = resource.Table(table_name)
+        if not user_id:
+            # Caller didn't pass user_id — locate the alert by scan to get it.
+            from boto3.dynamodb.conditions import Attr
+            resp = table.scan(
+                FilterExpression=Attr("alert_id").eq(alert_id),
+                Limit=1,
+            )
+            items = resp.get("Items", [])
+            if not items:
+                logger.warning("dynamo_dismiss_alert: alert_id %s not found", alert_id)
+                return False
+            user_id = items[0]["user_id"]
         table.update_item(
-            Key={"alert_id": alert_id},
+            Key={"user_id": user_id, "alert_id": alert_id},
             UpdateExpression="SET #s = :s, dismissed_at = :t",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
