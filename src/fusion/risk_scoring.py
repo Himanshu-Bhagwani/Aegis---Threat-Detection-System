@@ -103,11 +103,13 @@ class RiskFusionEngine:
     """
     
     # Default weights for each signal category
+    # Login anomaly and transaction fraud are weighted highest because
+    # they are the strongest indicators of active account compromise.
     DEFAULT_WEIGHTS = {
         ThreatCategory.GPS_SPOOFING: 1.5,
-        ThreatCategory.LOGIN_ANOMALY: 2.0,
+        ThreatCategory.LOGIN_ANOMALY: 3.0,
         ThreatCategory.PASSWORD_WEAKNESS: 1.0,
-        ThreatCategory.TRANSACTION_FRAUD: 2.5,
+        ThreatCategory.TRANSACTION_FRAUD: 3.5,
         ThreatCategory.ACCOUNT_TAKEOVER: 3.0,
         ThreatCategory.IDENTITY_THEFT: 2.5,
         ThreatCategory.BREACH_EXPOSURE: 1.8,

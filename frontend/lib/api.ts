@@ -222,7 +222,8 @@ export async function getWeightedUnifiedScore(
 }
 
 function localWeighted(g: number, l: number, p: number, f: number, b: number): number {
-  return (g * 1.5 + l * 2.0 + p * 1.0 + f * 2.5 + b * 1.8) / 8.8;
+  // Login anomaly (3.0) and fraud (3.5) weighted highest — matches backend DEFAULT_WEIGHTS
+  return (g * 1.5 + l * 3.0 + p * 1.0 + f * 3.5 + b * 1.8) / 10.8;
 }
 
 // ═══════════════════════════════════════════════════════
