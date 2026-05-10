@@ -7,7 +7,10 @@ WORKDIR /app
 
 # Install deps first (better layer caching)
 COPY package.json package-lock.json* ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+RUN npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-retries 5 && \
+    if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # App source
 COPY . .

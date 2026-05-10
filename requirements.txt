@@ -21,8 +21,7 @@ python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 
 # AWS Integration
-boto3>=1.34.0
-botocore>=1.34.0
+boto3>=1.28.0
 
 # HTTP Client (for HIBP breach checks)
 httpx>=0.26.0
@@ -38,5 +37,5 @@ python-dotenv>=1.0.0
 orjson>=3.9.0
 aiofiles>=23.2.1
 
-# Dashboard (legacy Streamlit, optional)
-streamlit>=1.28.0
+# Dashboard (legacy Streamlit, optional - uncomment if needed)
+# streamlit>=1.28.0
