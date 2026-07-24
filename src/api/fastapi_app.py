@@ -32,7 +32,7 @@ import uuid
 import json
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import (
@@ -66,6 +66,10 @@ from src.utils.aws_utils import (
     cognito_sign_in,
     cognito_sign_out,
     dynamo_put_event,
+    dynamo_put_alert,
+    dynamo_upsert_alert,
+    dynamo_find_open_alert,
+    dynamo_resolve_alert,
     dynamo_get_user_events,
     dynamo_get_user_profile,
     dynamo_get_recent_alerts,
@@ -77,8 +81,37 @@ from src.utils.aws_utils import (
     COGNITO_USER_POOL_ID,
 )
 
+# ── Multi-tenant (API-key) + webhook helpers ──────────
+from src.utils.api_keys import get_tenant_for_key
+from src.utils.webhooks import send_threat_webhook
+from src.utils.profiles import (
+    register_profile,
+    update_from_event,
+    get_tenant_profiles,
+    to_dashboard_profile,
+    login_stats,
+    transaction_stats,
+    delete_profile,
+)
+from src.api.tenant_context import (
+    set_current_tenant,
+    get_current_tenant,
+    current_tenant_id,
+    scope_user_id,
+    unscope_user_id,
+    DEFAULT_TENANT,
+)
+
 CRITICAL_THRESHOLD = float(os.getenv("CRITICAL_RISK_THRESHOLD", "0.75"))
 HIGH_THRESHOLD     = float(os.getenv("HIGH_RISK_THRESHOLD",     "0.50"))
+
+# When true, the detection endpoints require a valid X-Api-Key header.
+REQUIRE_API_KEY = os.getenv("APEILO_REQUIRE_API_KEY", "false").lower() in ("1", "true", "yes")
+# Path prefixes that represent scored detection traffic (subject to API-key auth).
+_API_KEY_PROTECTED_PREFIXES = (
+    "/gps", "/login", "/password", "/fraud", "/risk", "/breach", "/device", "/query",
+    "/identity", "/alerts", "/profiles",
+)
 
 
 # ══════════════════════════════════════════════════════
@@ -141,6 +174,31 @@ class SignOutRequest(BaseModel):
     access_token: str = Field(..., description="The access token to invalidate")
 
 
+class RegisterIdentityRequest(BaseModel):
+    user_id: str = Field(..., description="Stable id for the user in the calling app")
+    name:    str = Field("", description="Display name")
+    email:   str = Field("", description="Email address")
+
+
+class LockdownRequest(BaseModel):
+    """Ask the connected app to block login access for a period of time."""
+    user_id: str = Field(..., description="Account to lock")
+    lock_minutes: int = Field(
+        15, ge=1, le=1440,
+        description="How long to block new logins (minutes). 10/15/30/60 are the presets.",
+    )
+
+
+class VerifyActivityRequest(BaseModel):
+    """The user's answer to a 'was this you?' challenge."""
+    user_id:    str  = Field(..., description="Who was challenged")
+    activity:   str  = Field("transaction", description="'transaction' or 'login'")
+    confirmed:  bool = Field(..., description="True = 'yes, that was me'")
+    risk_score: float = Field(0.0, ge=0, le=1)
+    detail:     Optional[Dict[str, Any]] = Field(None, description="Amount, hour, etc.")
+    alert_id:   Optional[str] = Field(None, description="Challenge being answered (marks it resolved)")
+
+
 # ══════════════════════════════════════════════════════
 # FastAPI App
 # ══════════════════════════════════════════════════════
@@ -172,14 +230,22 @@ Connect to `/ws` for a WebSocket stream of detection events.
 )
 
 # ── CORS ──────────────────────────────────────────────
+# Default local origins plus any extra ones from APEILO_CORS_ORIGINS
+# (comma-separated) so an integrating app on another port/host can connect.
+_default_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://localhost:5173",   # SODA (Vite dev / container)
+    "http://127.0.0.1:5173",
+]
+_extra_origins = [o.strip() for o in os.getenv("APEILO_CORS_ORIGINS", "").split(",") if o.strip()]
+_cors_origins = _default_origins + _extra_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=["*"] if "*" in _extra_origins else _cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -207,6 +273,43 @@ async def telemetry_middleware(request: Request, call_next):
         pass
 
     return response
+
+
+# ── API-key → tenant resolution ───────────────────────
+def _path_is_protected(path: str) -> bool:
+    return any(path.startswith(p) for p in _API_KEY_PROTECTED_PREFIXES)
+
+
+@app.middleware("http")
+async def tenant_middleware(request: Request, call_next):
+    """Resolve the caller's tenant from the X-Api-Key header.
+
+    - A valid key  → that tenant (isolated namespace + its webhook).
+    - No / bad key → the default 'apeilo' tenant (keeps the bundled dashboard
+      working). If APEILO_REQUIRE_API_KEY=true, protected paths 401 instead.
+    """
+    api_key = request.headers.get("x-api-key", "")
+    tenant  = None
+    if api_key:
+        try:
+            tenant = get_tenant_for_key(api_key)
+        except Exception as e:
+            logger.warning("API key lookup failed: %s", e)
+            tenant = None
+
+    set_current_tenant(tenant)             # None resolves to the default tenant
+    request.state.tenant = get_current_tenant()
+
+    if REQUIRE_API_KEY and _path_is_protected(request.url.path) and not tenant:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={
+                "error":   "invalid_api_key",
+                "message": "A valid X-Api-Key header is required for this endpoint.",
+            },
+        )
+
+    return await call_next(request)
 
 
 # ── Include detection routers ─────────────────────────
@@ -283,16 +386,271 @@ async def login_legacy(body: SignInRequest):
 # IDENTITY & EVENT HISTORY
 # ══════════════════════════════════════════════════════
 
+@app.post("/identity/register", tags=["Identity"], summary="Register/refresh a user profile on sign-in")
+async def register_identity(body: RegisterIdentityRequest):
+    """Called by an integrating app (e.g. SODA) when a user signs in.
+
+    Creates the user's profile if new, or refreshes name/email, so the very
+    first login shows up on the dashboard even before any scores exist.
+    """
+    tid    = current_tenant_id()
+    scoped = scope_user_id(body.user_id)
+    row    = register_profile(tid, scoped, body.name, body.email)
+    return {
+        "success":   True,
+        "tenant_id": tid,
+        "profile":   to_dashboard_profile(row, tid) if row else None,
+    }
+
+
+@app.get("/profiles", tags=["Identity"], summary="List the current tenant's live user profiles")
+async def list_profiles():
+    """Real per-user profiles aggregated from scored events — what the dashboard shows."""
+    tid   = current_tenant_id()
+    items = get_tenant_profiles(tid)
+    return {"profiles": items, "count": len(items), "tenant_id": tid}
+
+
+@app.post("/identity/lockdown", tags=["Identity"],
+          summary="Block login access to a compromised account for a period")
+async def lockdown_account(body: LockdownRequest):
+    """Sends an `account.lockdown` webhook telling the connected app to block
+    new logins for `lock_minutes` and end existing sessions. Apeilo can't touch
+    another app's sessions itself — the app enforces the lock and shows the
+    countdown to the user."""
+    tenant = get_current_tenant()
+    tid    = tenant.get("tenant_id", "apeilo")
+    scoped = scope_user_id(body.user_id)
+
+    now        = datetime.now(timezone.utc)
+    lock_until = now + timedelta(minutes=body.lock_minutes)
+    payload = {
+        "risk_level":     "critical",
+        "lock_minutes":   body.lock_minutes,
+        "lock_until":     lock_until.isoformat(),
+        "primary_threats": ["account_compromise_confirmed"],
+        "recommended_actions": [
+            f"Block new sign-ins for {body.lock_minutes} minutes.",
+            "End active sessions for this account.",
+        ],
+    }
+    try:
+        dynamo_put_event(
+            user_id=scoped, event_type="account_lockdown",
+            scores={"lock_minutes": body.lock_minutes, "lock_until": lock_until.isoformat()},
+            tenant_id=tid,
+        )
+    except Exception as e:
+        logger.debug("lockdown persist skipped: %s", e)
+
+    delivered = False
+    try:
+        delivered = send_threat_webhook(
+            tenant=tenant, event_type="account.lockdown",
+            user_id=body.user_id, risk_score=1.0,
+            risk_level="critical", result=payload,
+        )
+    except Exception as e:
+        logger.warning("lockdown webhook failed: %s", e)
+
+    return {
+        "success": True,
+        "user_id": body.user_id,
+        "lock_minutes": body.lock_minutes,
+        "lock_until": lock_until.isoformat(),
+        "webhook_delivered": delivered,
+    }
+
+
+@app.get("/identity/{user_id}/stepup-status", tags=["Identity"],
+         summary="Step-up verification status for a suspicious success (polled by the connected app)")
+async def stepup_status(user_id: str):
+    """After a login succeeds on the heels of failed attempts, the connected app
+    holds access and polls this until the account owner answers on the Apeilo
+    dashboard: 'pending' → keep waiting, 'confirmed' → grant access, 'denied' →
+    block, 'none' → no step-up is outstanding."""
+    scoped = scope_user_id(user_id)
+    # Newest step-up challenge for this user, whatever its status.
+    from src.utils.aws_utils import dynamo_get_recent_alerts as _gra
+    tid = current_tenant_id()
+    alerts = _gra(limit=100, tenant_id=tid)
+    mine = [
+        a for a in alerts
+        if a.get("user_id") == scoped and a.get("alert_type") == "challenge_login_stepup"
+    ]
+    if not mine:
+        return {"status": "none", "user_id": user_id}
+    latest = max(mine, key=lambda a: a.get("timestamp", ""))
+    st = latest.get("status", "open")
+    mapped = {"open": "pending", "confirmed": "confirmed", "denied": "denied"}.get(st, "pending")
+    return {"status": mapped, "user_id": user_id, "alert_id": latest.get("alert_id")}
+
+
+@app.get("/challenges", tags=["Identity"],
+         summary="Pending 'was this you?' challenges for this tenant")
+async def list_challenges(limit: int = 20):
+    """Unanswered challenges, newest first — shown as modals in the Apeilo
+    dashboard so the account owner/analyst can verify the activity."""
+    tid   = current_tenant_id()
+    items = dynamo_get_recent_alerts(limit=100, tenant_id=tid)
+    out = []
+    for a in items:
+        if not str(a.get("alert_type", "")).startswith("challenge_"):
+            continue
+        if a.get("status") != "open":
+            continue
+        d = a.get("details") or {}
+        out.append({
+            "alert_id":   a.get("alert_id"),
+            "user_id":    d.get("display_user") or unscope_user_id(a.get("user_id", "")),
+            "activity":   d.get("activity", "transaction"),
+            "risk_score": float(a.get("risk_score") or 0),
+            "risk_level": d.get("risk_level", "unknown"),
+            "tone":       d.get("tone", "verify"),
+            "timestamp":  a.get("timestamp"),
+            "detail":     d,
+        })
+    return {"challenges": out[:limit], "count": len(out[:limit]), "tenant_id": tid}
+
+
+@app.post("/identity/verify-activity", tags=["Identity"],
+          summary="Record the user's answer to a 'was this you?' challenge")
+async def verify_activity(body: VerifyActivityRequest):
+    """When the user denies an activity it becomes a confirmed incident: an
+    alert is raised and the tenant's webhook fires immediately. When they
+    confirm it, the event is recorded as benign so it stops being treated as
+    an anomaly."""
+    tenant    = get_current_tenant()
+    tid       = tenant.get("tenant_id", "apeilo")
+    scoped    = scope_user_id(body.user_id)
+    detail    = body.detail or {}
+
+    try:
+        dynamo_put_event(
+            user_id    = scoped,
+            event_type = "activity_verification",
+            scores     = {
+                "activity":   body.activity,
+                "confirmed":  body.confirmed,
+                "risk_score": body.risk_score,
+                # `amount` is read back by transaction_baseline() so a payment
+                # the user approves raises what counts as normal for them.
+                **detail,
+            },
+            tenant_id  = tid,
+        )
+    except Exception as e:
+        logger.debug("verification persist skipped: %s", e)
+
+    # Close the queued challenge, recording its outcome so a waiting connected
+    # app (step-up flow) can read whether the user confirmed or denied.
+    if body.alert_id:
+        try:
+            dynamo_resolve_alert(body.alert_id, scoped, "confirmed" if body.confirmed else "denied")
+        except Exception as e:
+            logger.debug("challenge resolve skipped: %s", e)
+
+    # A confirmed step-up ("yes, the sign-in was me, despite the failures") is
+    # trusted but not fully cleared — the burst really happened — so login risk
+    # settles at a cautious ~45% rather than snapping back to near-zero.
+    if body.confirmed and body.activity in ("login_stepup", "login", "login_failed"):
+        try:
+            update_from_event(tid, scoped, "login_score",
+                              {"anomaly_probability": 0.45, "risk_level": "medium"})
+        except Exception as e:
+            logger.debug("step-up risk update skipped: %s", e)
+        # Confirming the success also clears the sibling failed-login challenge
+        # from the same burst, so the owner isn't left with a stale popup.
+        if body.activity == "login_stepup":
+            try:
+                leftover = dynamo_find_open_alert(scoped, "challenge_login_failed")
+                if leftover:
+                    dynamo_resolve_alert(leftover["alert_id"], scoped, "confirmed")
+            except Exception as e:
+                logger.debug("sibling challenge cleanup skipped: %s", e)
+
+    if not body.confirmed:
+        # The user says it wasn't them — treat as a confirmed incident.
+        payload = {
+            "risk_level":          "critical",
+            "primary_threats":     [f"user_denied_{body.activity}"],
+            "recommended_actions": [
+                "User denied this activity — treat as confirmed fraud.",
+                "Force re-authentication and review recent activity.",
+            ],
+            "confirmed_by_user":   False,
+            **detail,
+        }
+        try:
+            dynamo_put_alert(
+                user_id    = scoped,
+                alert_type = f"denied_{body.activity}",
+                risk_score = max(0.9, body.risk_score),
+                details    = payload,
+                tenant_id  = tid,
+            )
+        except Exception as e:
+            logger.debug("verification alert skipped: %s", e)
+        try:
+            send_threat_webhook(
+                tenant     = tenant,
+                event_type = f"denied_{body.activity}",
+                user_id    = body.user_id,
+                risk_score = max(0.9, body.risk_score),
+                risk_level = "critical",
+                result     = payload,
+            )
+        except Exception as e:
+            logger.warning("verification webhook failed: %s", e)
+
+    return {
+        "success":   True,
+        "confirmed": body.confirmed,
+        "escalated": not body.confirmed,
+        "user_id":   body.user_id,
+    }
+
+
+@app.get("/identity/{user_id}/login-stats", tags=["Identity"],
+         summary="Personal login-hour histogram + recent attempts")
+async def get_login_stats(user_id: str, limit: int = 400):
+    """Per-user login behaviour: how often they sign in at each hour, the risk
+    curve adapted to that habit, their usual hour, and recent attempts with
+    failed-attempt counts and timestamps."""
+    tid = current_tenant_id()
+    return login_stats(tid, scope_user_id(user_id), limit=limit)
+
+
+@app.get("/identity/{user_id}/transaction-stats", tags=["Identity"],
+         summary="Real transaction history + fraud aggregates")
+async def get_transaction_stats(user_id: str, limit: int = 200):
+    """Recent scored transactions for this user with amounts, timing, velocity
+    and how risky transactions compare against their normal spend."""
+    tid = current_tenant_id()
+    return transaction_stats(tid, scope_user_id(user_id), limit=limit)
+
+
+@app.delete("/profiles/{user_id}", tags=["Identity"], summary="Delete a user profile")
+async def delete_user_profile(user_id: str):
+    """Remove a profile from the current tenant. Stored events are left intact
+    (they expire via TTL); only the aggregated profile is removed."""
+    tid = current_tenant_id()
+    ok  = delete_profile(tid, scope_user_id(user_id))
+    return {"success": ok, "user_id": user_id, "tenant_id": tid}
+
+
 @app.get("/identity/{user_id}", tags=["Identity"])
 async def get_identity_profile(
     user_id: str,
     user: Optional[dict] = Depends(optional_auth),
 ):
     """Fetch a user's behavioral profile and recent event history from DynamoDB."""
-    profile = dynamo_get_user_profile(user_id)
-    events  = dynamo_get_user_events(user_id, limit=20)
+    scoped  = scope_user_id(user_id)
+    profile = dynamo_get_user_profile(scoped)
+    events  = dynamo_get_user_events(scoped, limit=20)
     return {
         "user_id":       user_id,
+        "tenant_id":     current_tenant_id(),
         "profile":       profile or {"user_id": user_id, "note": "No profile data yet"},
         "recent_events": events,
         "event_count":   len(events),
@@ -307,8 +665,8 @@ async def get_user_events(
     user: Optional[dict] = Depends(optional_auth),
 ):
     """Fetch paginated detection event history for a user."""
-    events = dynamo_get_user_events(user_id, limit=limit, event_type=event_type)
-    return {"user_id": user_id, "events": events, "count": len(events)}
+    events = dynamo_get_user_events(scope_user_id(user_id), limit=limit, event_type=event_type)
+    return {"user_id": user_id, "tenant_id": current_tenant_id(), "events": events, "count": len(events)}
 
 
 # ══════════════════════════════════════════════════════
@@ -317,9 +675,10 @@ async def get_user_events(
 
 @app.get("/alerts", tags=["Alerts"])
 async def get_alerts(limit: int = 20, user: Optional[dict] = Depends(optional_auth)):
-    """Fetch recent security alerts for the dashboard."""
-    alerts = dynamo_get_recent_alerts(limit=limit)
-    return {"alerts": alerts, "count": len(alerts)}
+    """Fetch recent security alerts for the current tenant's dashboard."""
+    tid    = current_tenant_id()
+    alerts = dynamo_get_recent_alerts(limit=limit, tenant_id=tid)
+    return {"alerts": alerts, "count": len(alerts), "tenant_id": tid}
 
 
 @app.post("/alerts/{alert_id}/dismiss", tags=["Alerts"])
@@ -370,8 +729,16 @@ async def websocket_endpoint(ws: WebSocket):
 
 async def broadcast_detection_event(event_type: str, user_id: str, result: dict):
     """
-    Called by routers after scoring.
-    Broadcasts to WebSocket clients and fires SNS alert if critical.
+    Central sink for every scored event (called by all detection routers).
+
+    Responsibilities:
+      1. Persist the event to DynamoDB, namespaced by the caller's tenant.
+      2. Stream it to connected dashboard WebSocket clients.
+      3. On a critical score: persist an alert, POST the tenant's webhook, and
+         (if still configured) fire the legacy SNS alert.
+
+    Tenant scoping means one integrating app (e.g. SODA) never sees another's
+    users, events, or alerts.
     """
     risk_score = float(
         result.get("unified_score")
@@ -381,20 +748,127 @@ async def broadcast_detection_event(event_type: str, user_id: str, result: dict)
         or result.get("breach_probability")
         or 0.0
     )
+    risk_level = result.get("risk_level", "unknown")
 
+    tenant     = get_current_tenant()
+    tenant_id  = tenant.get("tenant_id", "apeilo")
+    scoped_uid = scope_user_id(user_id)
+
+    # Scoring calls that carry no user (e.g. an ad-hoc password check from the
+    # dashboard) must not spawn a phantom "anonymous" profile.
+    is_real_user = bool(user_id) and user_id not in ("anonymous", "guest", "unknown")
+
+    # ── 1. Persist the event + fold it into the user's live profile ──
+    if is_real_user:
+        try:
+            dynamo_put_event(
+                user_id    = scoped_uid,
+                event_type = event_type,
+                scores     = result,
+                tenant_id  = tenant_id,
+            )
+        except Exception as e:
+            logger.debug("event persist skipped: %s", e)
+
+        try:
+            update_from_event(tenant_id, scoped_uid, event_type, result)
+        except Exception as e:
+            logger.debug("profile update skipped: %s", e)
+
+    # ── 1c. Queue a "was this you?" challenge for the Apeilo dashboard ──
+    # Challenges are answered in Apeilo (by whoever monitors the account), not
+    # in the connected app — that app only shows a passive alert toast.
+    #
+    # Login challenges are COALESCED: a brute-force burst produces one challenge
+    # (raised on the 5th failed attempt) that keeps updating with the running
+    # count, rather than a fresh popup per attempt. A success right after a burst
+    # is a distinct "step-up" challenge that gates access to the connected app.
+    if is_real_user:
+        failed        = int(result.get("failed_10min") or 0)
+        login_success = result.get("login_success")   # True / False / None
+        alert_type    = None
+        activity      = None
+        coalesce      = True
+
+        if event_type == "fraud_score" and result.get("challenge"):
+            alert_type, activity, coalesce = "challenge_transaction", "transaction", False
+        elif event_type in ("unified_risk", "login_score"):
+            if login_success is False and failed >= 5:
+                # Brute force in progress — ask once, coalesce further failures.
+                alert_type, activity = "challenge_login_failed", "login_failed"
+            elif login_success is True and failed >= 5:
+                # A success on the heels of failures — step up before granting access.
+                alert_type, activity = "challenge_login_stepup", "login_stepup"
+            elif login_success is None and risk_score >= CRITICAL_THRESHOLD:
+                # Other high-risk login (e.g. impossible travel), outcome unknown.
+                alert_type, activity = "challenge_login", "login"
+
+        if alert_type:
+            details = {
+                "activity":        activity,
+                "risk_level":      risk_level,
+                "tone":            result.get("challenge_tone", "verify"),
+                "amount":          result.get("amount"),
+                "hour":            result.get("hour", result.get("hour_of_day")),
+                "source":          result.get("source"),
+                "failed_attempts": failed,
+                "amount_ratio":    result.get("amount_ratio_vs_history"),
+                "display_user":    user_id,
+            }
+            try:
+                if coalesce:
+                    dynamo_upsert_alert(scoped_uid, alert_type, risk_score, details, tenant_id)
+                else:
+                    dynamo_put_alert(scoped_uid, alert_type, risk_score, details, tenant_id)
+            except Exception as e:
+                logger.debug("challenge queue skipped: %s", e)
+
+    # ── 2. WebSocket broadcast (raw user id for display) ──
     message = {
         "type":       "detection_event",
         "event_type": event_type,
+        "tenant_id":  tenant_id,
         "user_id":    user_id,
         "risk_score": round(risk_score, 4),
-        "risk_level": result.get("risk_level", "unknown"),
+        "risk_level": risk_level,
         "timestamp":  datetime.now(timezone.utc).isoformat(),
         "details":    result,
     }
     await ws_manager.broadcast(message)
 
-    if risk_score >= CRITICAL_THRESHOLD:
+    # ── 3. Critical: alert + webhook + (legacy) SNS ──
+    if risk_score >= CRITICAL_THRESHOLD and is_real_user:
         event_id = result.get("event_id", str(uuid.uuid4()))
+
+        try:
+            dynamo_put_alert(
+                user_id    = scoped_uid,
+                alert_type = event_type,
+                risk_score = risk_score,
+                details    = {
+                    "risk_level":          risk_level,
+                    "primary_threats":     result.get("primary_threats", [event_type]),
+                    "event_id":            event_id,
+                    "recommended_actions": result.get("recommended_actions", []),
+                },
+                tenant_id  = tenant_id,
+            )
+        except Exception as e:
+            logger.debug("alert persist skipped: %s", e)
+
+        # Outbound webhook to the tenant's registered URL (replaces SNS).
+        try:
+            send_threat_webhook(
+                tenant     = tenant,
+                event_type = event_type,
+                user_id    = user_id,
+                risk_score = risk_score,
+                risk_level = risk_level,
+                result     = result,
+            )
+        except Exception as e:
+            logger.warning("webhook delivery failed: %s", e)
+
         try:
             sns_alert_critical_risk(
                 user_id             = user_id,
@@ -492,11 +966,20 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.on_event("startup")
 async def startup():
+    # Create local DynamoDB tables + seed the bootstrap API key (no-op unless
+    # APEILO_LOCAL_MODE is on and a local DynamoDB endpoint is configured).
+    try:
+        from src.utils.local_bootstrap import bootstrap
+        bootstrap()
+    except Exception as e:
+        logger.warning("Local bootstrap skipped: %s", e)
+
     print("=" * 60)
-    print("  AEGIS THREAT DETECTION API v2.0")
+    print("  APEILO THREAT DETECTION API v2.0")
     print("=" * 60)
-    print(f"  AWS  : {'active' if aws_available() else 'mock/local'}")
+    print(f"  Data : {'DynamoDB' if aws_available() else 'mock/local'}")
     print(f"  Auth : {'Cognito' if COGNITO_USER_POOL_ID else 'Local JWT'}")
+    print(f"  Keys : {'required' if REQUIRE_API_KEY else 'optional (default tenant)'}")
     print(f"  WS   : ws://localhost:8000/ws")
     print(f"  Docs : http://localhost:8000/docs")
     print("=" * 60)

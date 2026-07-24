@@ -5,6 +5,8 @@
 export interface AegisConfig {
   /** Base URL of the AEGIS API. Default: "http://localhost:8000" */
   apiUrl?: string;
+  /** Tenant API key — sent as the X-Api-Key header on every request. */
+  apiKey?: string;
   /** Unique identifier for the current user */
   userId: string;
   /** Bearer token for API authentication */

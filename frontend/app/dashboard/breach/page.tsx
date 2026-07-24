@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { checkPasswordBreach, checkEmailBreach, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
@@ -53,12 +53,35 @@ export default function BreachPage() {
   const [emResult, setEmResult] = useState<any>(null);
   const [loading,  setLoading]  = useState<"pw"|"em"|null>(null);
   const [updated,  setUpdated]  = useState<string | null>(null);
+  const [autoEmail, setAutoEmail] = useState<any>(null);
+  const [autoLoading, setAutoLoading] = useState(false);
+
+  // Automatically assess the selected profile: run the email check for their
+  // address and surface the stored detail from their last password check.
+  const pwMeta = selected?.password_meta ?? null;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function auto() {
+      if (!selected?.email) { setAutoEmail(null); return; }
+      setAutoLoading(true);
+      try {
+        const res = await checkEmailBreach(selected.email, selected.id);
+        if (!cancelled) setAutoEmail(res);
+      } catch { if (!cancelled) setAutoEmail(null); }
+      finally { if (!cancelled) setAutoLoading(false); }
+    }
+    auto();
+    return () => { cancelled = true; };
+  }, [selected?.id, selected?.email]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function checkPw() {
     if (!password.trim()) return;
     setLoading("pw"); setUpdated(null);
     try {
-      const res = await checkPasswordBreach(password);
+      // Pass the selected profile so the check attributes to that user
+      // instead of spawning an "anonymous" profile.
+      const res = await checkPasswordBreach(password, selected?.id);
       setPwResult(res);
       if (res?.breach_probability != null && selected) {
         const newBreach = Math.min(1, Math.max(0, selected.metrics.breach_risk * 0.7 + res.breach_probability * 0.3));
@@ -75,11 +98,13 @@ export default function BreachPage() {
     if (!email.trim()) return;
     setLoading("em"); setUpdated(null);
     try {
-      const res = await checkEmailBreach(email);
+      const res = await checkEmailBreach(email, selected?.id);
       setEmResult(res);
       if (selected) {
-        const count = res?.breach_count ?? 0;
-        const inferredRisk = Math.min(1, count * 0.15);
+        // Use the backend's combined score (confirmed breaches + structural
+        // exposure) rather than inferring purely from a breach count that is
+        // always 0 when no HIBP key is configured.
+        const inferredRisk = res?.risk_score ?? Math.min(1, (res?.breach_count ?? 0) * 0.15);
         const newBreach = Math.min(1, Math.max(0, selected.metrics.breach_risk * 0.7 + inferredRisk * 0.3));
         const m = selected.metrics;
         const unified = await getWeightedUnifiedScore(m.gps_spoof, m.login_anomaly, m.password_leak, m.fraud_risk, newBreach, selected.id);
@@ -148,6 +173,119 @@ export default function BreachPage() {
           }))} />
         </div>
       )}
+
+      {/* ── Automatic assessment for the selected profile ───────── */}
+      {selected && (
+        <div className="panel" style={{ padding: "18px 22px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em" }}>
+              Automatic Assessment — {selected.name}
+            </div>
+            <span style={{ fontSize: 11, color: "var(--text-disabled)", fontFamily: "var(--font-mono)" }}>
+              {selected.email || "no email on profile"}
+            </span>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+
+            {/* Password posture from the last recorded check */}
+            <div style={{ padding: "14px 16px", borderRadius: 10, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "var(--accent-purple)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+                Password Posture
+              </div>
+              {pwMeta ? (
+                <>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+                    <span style={{ fontSize: 26, fontWeight: 800, fontFamily: "var(--font-mono)", color: riskColor(1 - (pwMeta.strength_score ?? 0)) }}>
+                      {Math.round((pwMeta.strength_score ?? 0) * 100)}%
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>strength</span>
+                    {pwMeta.is_pwned && (
+                      <span style={{ marginLeft: "auto", fontSize: 9, padding: "3px 8px", borderRadius: 5, fontWeight: 800, color: "#fff", background: "#b91c1c" }}>
+                        PWNED ×{(pwMeta.pwned_count ?? 0).toLocaleString()}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                    {[
+                      { ok: (pwMeta.length ?? 0) >= 12, good: `${pwMeta.length} chars`, bad: `Only ${pwMeta.length} chars` },
+                      { ok: (pwMeta.char_types ?? 0) >= 4, good: "All character types", bad: `${pwMeta.char_types}/4 character types` },
+                      { ok: (pwMeta.entropy_bits ?? 0) >= 60, good: `${Math.round(pwMeta.entropy_bits)} bits entropy`, bad: `Low entropy (${Math.round(pwMeta.entropy_bits)} bits)` },
+                      { ok: !pwMeta.is_pwned, good: "Not in breach corpora", bad: "Found in data breaches" },
+                    ].map((t, i) => (
+                      <span key={i} style={{
+                        fontSize: 9.5, padding: "3px 8px", borderRadius: 5, fontWeight: 700,
+                        color: t.ok ? "var(--risk-minimal)" : "#ef4444",
+                        background: t.ok ? "rgba(0,255,136,0.08)" : "rgba(239,68,68,0.1)",
+                        border: `1px solid ${t.ok ? "rgba(0,255,136,0.22)" : "rgba(239,68,68,0.28)"}`,
+                      }}>
+                        {t.ok ? "✓ " : "✕ "}{t.ok ? t.good : t.bad}
+                      </span>
+                    ))}
+                  </div>
+                  {pwMeta.recommendations?.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      {pwMeta.recommendations.slice(0, 3).map((r: string, i: number) => (
+                        <div key={i} style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.5 }}>• {r}</div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.6 }}>
+                  No password check recorded yet. Passwords are never stored, so this fills in the
+                  first time {selected.name} signs in to the connected app — or check one manually below.
+                </div>
+              )}
+            </div>
+
+            {/* Email exposure, checked automatically */}
+            <div style={{ padding: "14px 16px", borderRadius: 10, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#f97316", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+                Email Exposure
+              </div>
+              {autoLoading ? (
+                <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>Checking…</div>
+              ) : autoEmail && !autoEmail.error ? (
+                <>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+                    <span style={{ fontSize: 26, fontWeight: 800, fontFamily: "var(--font-mono)", color: riskColor(autoEmail.risk_score ?? 0) }}>
+                      {Math.round((autoEmail.risk_score ?? 0) * 100)}%
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "capitalize" }}>
+                      {autoEmail.risk_level ?? "unknown"} exposure
+                    </span>
+                    {autoEmail.breach_count > 0 && (
+                      <span style={{ marginLeft: "auto", fontSize: 9, padding: "3px 8px", borderRadius: 5, fontWeight: 800, color: "#fff", background: "#b91c1c" }}>
+                        {autoEmail.breach_count} BREACHES
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {(autoEmail.assessment?.signals ?? []).slice(0, 3).map((s: string, i: number) => (
+                      <div key={i} style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.5 }}>• {s}</div>
+                    ))}
+                  </div>
+                  {autoEmail.note && (
+                    <div style={{ marginTop: 9, fontSize: 10, color: autoEmail.verified ? "var(--risk-minimal)" : "#f59e0b" }}>
+                      {autoEmail.verified ? "Verified" : "Not verified"} — {autoEmail.note}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+                  No email on this profile to assess.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manual checks */}
+      <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginTop: 4 }}>
+        Manual Check
+      </div>
 
       {/* Two-column check panels */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
@@ -294,11 +432,67 @@ export default function BreachPage() {
                 </span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "9px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-                <span style={{ color: "var(--text-muted)" }}>Risk Level</span>
-                <span style={{ fontWeight: 700, color: riskColor(emResult.breach_count > 3 ? 0.8 : emResult.breach_count > 0 ? 0.5 : 0.1), textTransform: "capitalize" }}>
-                  {emResult.risk_level ?? (emResult.breach_count > 0 ? "compromised" : "clean")}
+                <span style={{ color: "var(--text-muted)" }}>Exposure Risk</span>
+                <span style={{ fontWeight: 700, fontFamily: "var(--font-mono)", color: riskColor(emResult.risk_score ?? 0), fontSize: 16 }}>
+                  {emResult.risk_score != null ? `${(emResult.risk_score * 100).toFixed(0)}%` : "—"}
                 </span>
               </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "9px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                <span style={{ color: "var(--text-muted)" }}>Risk Level</span>
+                <span style={{ fontWeight: 700, color: riskColor(emResult.risk_score ?? 0), textTransform: "capitalize" }}>
+                  {emResult.risk_level ?? "unknown"}
+                </span>
+              </div>
+
+              {/* Be explicit about whether this was verified against real breach data */}
+              {emResult.note && (
+                <div style={{
+                  marginTop: 10, padding: "9px 12px", borderRadius: 8, fontSize: 11, lineHeight: 1.6,
+                  background: emResult.verified ? "rgba(0,255,136,0.05)" : "rgba(245,158,11,0.06)",
+                  border: `1px solid ${emResult.verified ? "rgba(0,255,136,0.18)" : "rgba(245,158,11,0.22)"}`,
+                  color: "var(--text-secondary)",
+                }}>
+                  <b style={{ color: emResult.verified ? "var(--risk-minimal)" : "#f59e0b" }}>
+                    {emResult.verified ? "Verified" : "Not verified"}
+                  </b>{" — "}{emResult.note}
+                </div>
+              )}
+
+              {/* Why this address scored the way it did */}
+              {emResult.assessment?.signals?.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
+                    Exposure Signals
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {emResult.assessment.signals.map((s: string, i: number) => (
+                      <div key={i} style={{
+                        display: "flex", gap: 8, alignItems: "flex-start",
+                        padding: "8px 11px", borderRadius: 8, fontSize: 11.5, lineHeight: 1.55,
+                        background: "rgba(255,255,255,0.02)",
+                        border: "1px solid rgba(255,255,255,0.05)",
+                        color: "var(--text-secondary)",
+                      }}>
+                        <span style={{ flexShrink: 0 }}>•</span><span>{s}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+                    {[
+                      emResult.assessment.is_disposable && { label: "Disposable domain", color: "#ef4444" },
+                      emResult.assessment.is_freemail && { label: "Free provider", color: "#f59e0b" },
+                      emResult.assessment.is_role_account && { label: "Role mailbox", color: "#f59e0b" },
+                      !emResult.assessment.is_disposable && !emResult.assessment.is_freemail && { label: "Custom domain", color: "#00ff88" },
+                    ].filter(Boolean).map((t: any, i: number) => (
+                      <span key={i} style={{
+                        fontSize: 9, padding: "3px 9px", borderRadius: 6, fontWeight: 800,
+                        textTransform: "uppercase", letterSpacing: "0.07em",
+                        color: t.color, background: `${t.color}14`, border: `1px solid ${t.color}3a`,
+                      }}>{t.label}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
               {emResult.breaches?.length > 0 && (
                 <div style={{ marginTop: 12 }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>

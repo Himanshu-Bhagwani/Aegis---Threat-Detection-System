@@ -18,7 +18,6 @@ const DynRadar = dynamic(
 const MODULE_KEYS = [
   { key: "gps_spoof",     label: "GPS Spoofing",              desc: "Probability of GPS location spoofing", color: "var(--accent)" },
   { key: "login_anomaly", label: "Login Anomaly",             desc: "Unusual login patterns or failed attempts", color: "var(--accent-cyan)" },
-  { key: "password_leak", label: "Password Leak Possibility", desc: "Password found in breach databases", color: "var(--accent-purple)" },
   { key: "fraud_risk",    label: "Fraud Possibility",         desc: "Transaction fraud probability", color: "var(--risk-high)" },
   { key: "breach_risk",   label: "Breach Risk",               desc: "Data breach exposure likelihood", color: "var(--risk-critical)" },
 ];
@@ -65,7 +64,6 @@ export default function RiskPage() {
             name:     p.name.split(" ")[0],
             GPS:      Math.round(p.metrics.gps_spoof      * 100),
             Login:    Math.round(p.metrics.login_anomaly  * 100),
-            Password: Math.round(p.metrics.password_leak  * 100),
             Fraud:    Math.round(p.metrics.fraud_risk     * 100),
             Breach:   Math.round(p.metrics.breach_risk    * 100),
           }))} />
@@ -213,7 +211,6 @@ export default function RiskPage() {
                         <DynRadar data={[
                           { module: "GPS",      value: Math.round(p.metrics.gps_spoof     * 100), fullMark: 100 },
                           { module: "Login",    value: Math.round(p.metrics.login_anomaly * 100), fullMark: 100 },
-                          { module: "Password", value: Math.round(p.metrics.password_leak * 100), fullMark: 100 },
                           { module: "Fraud",    value: Math.round(p.metrics.fraud_risk    * 100), fullMark: 100 },
                           { module: "Breach",   value: Math.round(p.metrics.breach_risk   * 100), fullMark: 100 },
                         ]} />

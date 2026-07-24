@@ -5,10 +5,37 @@ import {
   Profile, AlertRecord,
   loadProfiles, saveProfiles, addProfile,
   updateProfileMetrics, generateAlerts,
+  removeProfile, hideDemoProfile,
 } from "@/lib/profiles";
-import { wsClient, WSEvent, dismissAlert as dismissAlertApi } from "@/lib/api";
+import {
+  wsClient, WSEvent, dismissAlert as dismissAlertApi,
+  getProfiles, RemoteProfile, deleteProfileRemote,
+} from "@/lib/api";
 
 const SELECTED_KEY = "apeilo_selected_profile";
+
+// Map a backend (live) profile into the local Profile shape.
+function remoteToProfile(rp: RemoteProfile): Profile {
+  return {
+    id:         rp.id,
+    name:       rp.name || rp.id,
+    email:      rp.email || "",
+    created_at: rp.created_at || new Date().toISOString(),
+    is_demo:    false,
+    notes:      rp.notes || "Live profile",
+    password_meta: rp.password_meta ?? null,
+    metrics: {
+      gps_spoof:     rp.metrics.gps_spoof,
+      login_anomaly: rp.metrics.login_anomaly,
+      password_leak: rp.metrics.password_leak,
+      fraud_risk:    rp.metrics.fraud_risk,
+      breach_risk:   rp.metrics.breach_risk,
+      unified_score: rp.metrics.unified_score,
+      risk_level:    rp.metrics.risk_level,
+      last_updated:  rp.metrics.last_updated,
+    },
+  };
+}
 
 interface ProfileContextValue {
   profiles:       Profile[];
@@ -20,6 +47,7 @@ interface ProfileContextValue {
   dismissAlert:   (id: string) => void;
   addNewProfile:  (name: string, email: string) => void;
   updateMetrics:  (id: string, partial: Parameters<typeof updateProfileMetrics>[2]) => void;
+  deleteProfile:  (id: string) => Promise<void>;
 }
 
 const ProfileCtx = createContext<ProfileContextValue | null>(null);
@@ -41,6 +69,30 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
     } catch {}
     setHydrated(true);
   }, []);
+
+  // Merge in real, event-driven profiles from the backend (the live SODA users)
+  // and keep them fresh by polling. WebSocket events then live-update them too.
+  const refreshRemote = useCallback(async () => {
+    try {
+      const { profiles: remote } = await getProfiles();
+      if (!Array.isArray(remote) || remote.length === 0) return;
+      const real = remote.map(remoteToProfile);
+      setProfiles(prev => {
+        const byId = new Map<string, Profile>();
+        for (const p of prev) byId.set(p.id, p);   // demo + locally-added first
+        for (const r of real) byId.set(r.id, r);    // live backend data wins
+        return Array.from(byId.values());
+      });
+    } catch {
+      /* backend unreachable — keep showing whatever we have */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshRemote();
+    const t = setInterval(refreshRemote, 8000);
+    return () => clearInterval(t);
+  }, [refreshRemote]);
 
   // Auto-update profile metrics from real-time unified_risk WebSocket events.
   // When the backend fires a unified_risk event with a user_id that matches a
@@ -80,6 +132,29 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
     setProfiles(prev => updateProfileMetrics(prev, id, partial));
   }, []);
 
+  const deleteProfile = useCallback(async (id: string) => {
+    const target = profiles.find(p => p.id === id);
+
+    // Demo profiles live only in the browser — remember the deletion so they
+    // don't reappear from the seed list on reload. Live profiles have a
+    // backend row: remove it first so the 8s poll can't resurrect them.
+    if (target?.is_demo) {
+      hideDemoProfile(id);
+    } else {
+      try { await deleteProfileRemote(id); } catch { /* already gone / offline */ }
+    }
+
+    const next = removeProfile(profiles, id);
+    setProfiles(next);
+
+    // Keep a valid selection after removing the selected profile.
+    if (id === selectedId) {
+      const fallback = next[0]?.id ?? "";
+      setSelectedIdRaw(fallback);
+      try { localStorage.setItem(SELECTED_KEY, fallback); } catch {}
+    }
+  }, [profiles, selectedId]);
+
   const dismissAlert = useCallback((id: string) => {
     // Optimistic local update
     setDismissedIds(prev => {
@@ -100,7 +175,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
     <ProfileCtx.Provider value={{
       profiles, selectedId, setSelectedId, selected,
       alerts, dismissedIds, dismissAlert,
-      addNewProfile, updateMetrics,
+      addNewProfile, updateMetrics, deleteProfile,
     }}>
       {children}
     </ProfileCtx.Provider>

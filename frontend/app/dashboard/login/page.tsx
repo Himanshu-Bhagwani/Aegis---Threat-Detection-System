@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
-import { scoreLogin, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
+import { scoreLogin, riskColor, formatScore, getWeightedUnifiedScore, getLoginStats, LoginStats } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
 
 const DynHourRisk = dynamic(
@@ -42,11 +42,27 @@ const IconChevronRight = () => (
 
 export default function LoginAnomalyPage() {
   const { selected, updateMetrics } = useProfiles();
-  const [form, setForm] = useState({ hour_of_day: 14, failed_10min: 0, is_new_comp: 0, comp_deg: 50, user_deg: 5, time_since_user_last: 3600 });
+  // NOTE: seed with a fixed hour so server and client render identically, then
+  // switch to the real local hour after mount (avoids a hydration mismatch).
+  const [form, setForm] = useState({ hour_of_day: 12, failed_10min: 0, is_new_comp: 0, comp_deg: 50, user_deg: 5, time_since_user_last: 3600 });
+
+  useEffect(() => {
+    setForm(f => ({ ...f, hour_of_day: new Date().getHours() }));
+  }, []);
   const [result,  setResult]  = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [updated, setUpdated] = useState(false);
+  const [stats,   setStats]   = useState<LoginStats | null>(null);
   const set = (k: string, v: number) => setForm(p => ({ ...p, [k]: v }));
+
+  // Load this user's real login history so the chart reflects their habits.
+  const loadStats = useCallback(async () => {
+    if (!selected) { setStats(null); return; }
+    try { setStats(await getLoginStats(selected.id)); }
+    catch { setStats(null); }
+  }, [selected?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { loadStats(); }, [loadStats]);
 
   async function run() {
     setLoading(true); setUpdated(false);
@@ -60,6 +76,7 @@ export default function LoginAnomalyPage() {
         updateMetrics(selected.id, { login_anomaly: newLogin, unified_score: unified });
         setUpdated(true);
       }
+      loadStats(); // refresh the histogram with the attempt we just scored
     } catch (e: any) { setResult({ error: e?.message }); }
     finally { setLoading(false); }
   }
@@ -106,16 +123,111 @@ export default function LoginAnomalyPage() {
         )}
       </div>
 
-      {/* ── Hour of day anomaly risk ──────────── */}
+      {/* ── Hour of day anomaly risk (adapts to this user) ──────────── */}
       <div className="panel" style={{ padding: "18px 22px" }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 14 }}>
-          Login Anomaly Risk by Hour of Day — Statistical Baseline
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em" }}>
+            Login Anomaly Risk by Hour — {stats?.is_personalised ? "Your Personal Baseline" : "Statistical Baseline"}
+          </div>
+          <div style={{
+            fontSize: 10, padding: "3px 9px", borderRadius: 6, fontWeight: 800,
+            textTransform: "uppercase", letterSpacing: "0.07em",
+            background: stats?.is_personalised ? "rgba(0,255,136,0.10)" : "rgba(255,255,255,0.05)",
+            color: stats?.is_personalised ? "var(--risk-minimal)" : "var(--text-disabled)",
+            border: `1px solid ${stats?.is_personalised ? "rgba(0,255,136,0.25)" : "rgba(255,255,255,0.08)"}`,
+          }}>
+            {stats ? `${stats.total_logins} login${stats.total_logins === 1 ? "" : "s"} recorded` : "no history yet"}
+          </div>
         </div>
-        <DynHourRisk highlightHour={form.hour_of_day} />
-        <div style={{ fontSize: 10, color: "var(--text-disabled)", marginTop: 6 }}>
-          Blue line = selected hour ({form.hour_of_day}:00) · Risk peaks during off-hours (midnight–5 AM)
+
+        {/* "You usually sign in around 9 PM" */}
+        {stats?.usual_label && stats.is_personalised && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, marginBottom: 12,
+            padding: "9px 13px", borderRadius: 9,
+            background: "rgba(0,255,136,0.06)", border: "1px solid rgba(0,255,136,0.18)",
+            fontSize: 12, color: "var(--text-secondary)",
+          }}>
+            <span style={{ color: "var(--risk-minimal)", fontSize: 14 }}>◷</span>
+            <span>
+              You usually sign in around <b style={{ color: "var(--risk-minimal)" }}>{stats.usual_label}</b>
+              {" "}— {stats.usual_count} of {stats.total_logins} logins. Risk at that hour is lowered because it's normal for you.
+            </span>
+          </div>
+        )}
+
+        <DynHourRisk highlightHour={form.hour_of_day} hours={stats?.hours} />
+        <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 6 }}>
+          Blue line = selected hour ({form.hour_of_day}:00)
+          {stats?.is_personalised
+            ? " · Blue = hours you sign in at (green outline = your usual) · Other bars are the generic baseline · Hover for counts"
+            : " · Generic baseline until a few successful logins are recorded · Risk peaks during off-hours (midnight–5 AM)"}
         </div>
       </div>
+
+      {/* ── Recent sign-in attempts + failures ──────────── */}
+      {stats && stats.recent.length > 0 && (
+        <div className="panel" style={{ padding: "18px 22px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em" }}>
+              Recent Sign-in Attempts
+            </div>
+            <div style={{
+              fontSize: 10, padding: "3px 9px", borderRadius: 6, fontWeight: 800,
+              textTransform: "uppercase", letterSpacing: "0.07em",
+              background: stats.failed_total > 0 ? "rgba(239,68,68,0.10)" : "rgba(0,255,136,0.08)",
+              color: stats.failed_total > 0 ? "#ef4444" : "var(--risk-minimal)",
+              border: `1px solid ${stats.failed_total > 0 ? "rgba(239,68,68,0.25)" : "rgba(0,255,136,0.2)"}`,
+            }}>
+              {stats.failed_total} failed attempt{stats.failed_total === 1 ? "" : "s"}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto" }}>
+            {stats.recent.map((a, i) => {
+              const when = a.timestamp ? new Date(a.timestamp) : null;
+              return (
+                <div key={i} style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+                  padding: "9px 13px", borderRadius: 8,
+                  background: a.failed_attempts > 0 ? "rgba(239,68,68,0.05)" : "rgba(255,255,255,0.02)",
+                  border: `1px solid ${a.failed_attempts > 0 ? "rgba(239,68,68,0.16)" : "rgba(255,255,255,0.05)"}`,
+                  fontSize: 12,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                    <span style={{
+                      width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+                      background: riskColor(a.risk), boxShadow: `0 0 7px ${riskColor(a.risk)}`,
+                    }} />
+                    <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+                      {when ? when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : a.hour_label}
+                    </span>
+                    <span style={{
+                      fontSize: 9, padding: "2px 7px", borderRadius: 5, fontWeight: 800,
+                      textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0,
+                      color: a.succeeded ? "var(--risk-minimal)" : "#ef4444",
+                      background: a.succeeded ? "rgba(0,255,136,0.10)" : "rgba(239,68,68,0.12)",
+                      border: `1px solid ${a.succeeded ? "rgba(0,255,136,0.25)" : "rgba(239,68,68,0.3)"}`,
+                    }}>
+                      {a.succeeded ? "Success" : "Failed"}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+                    {a.failed_attempts > 0 && (
+                      <span style={{ color: "#ef4444", fontWeight: 700, fontSize: 11 }}>
+                        {a.failed_attempts} in 10 min
+                      </span>
+                    )}
+                    <span style={{ fontFamily: "var(--font-mono)", color: riskColor(a.risk), fontWeight: 800 }}>
+                      {(a.risk * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Main grid */}
       <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>

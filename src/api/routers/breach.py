@@ -58,26 +58,25 @@ async def check_password_breach_endpoint(body: PasswordBreachRequest, request: R
         confidence = 0.9 if result["api_available"] else 0.6,
     )
 
-    if body.user_id:
-        dynamo_put_event(
-            user_id    = body.user_id,
-            event_type = "breach_check",
-            scores     = {
-                "breach_probability": result["breach_probability"],
-                "is_pwned":          result["is_pwned"],
-                "strength_score":    result["strength_score"],
-                "risk_level":        result["risk_level"],
-            },
-        )
-
+    # NOTE: persistence happens centrally in broadcast_detection_event so the
+    # event is tenant-scoped and folded into the user's profile. Writing here
+    # too would create a duplicate, un-namespaced row.
     try:
         broadcast = getattr(request.app.state, "broadcast", None)
         if broadcast:
             uid = body.user_id or "anonymous"
+            # Send the full assessment so the profile can retain the detail
+            # (strength, length, character classes, advice) for the dashboard.
             await broadcast("breach_score", uid, {
                 "breach_probability": result["breach_probability"],
                 "risk_level":        result["risk_level"],
                 "is_pwned":          result["is_pwned"],
+                "pwned_count":       result.get("pwned_count", 0),
+                "strength_score":    result.get("strength_score", 0.0),
+                "entropy_bits":      result.get("entropy_bits", 0.0),
+                "length":            result.get("length", 0),
+                "char_types":        result.get("char_types", 0),
+                "recommendations":   result.get("recommendations", []),
                 "user_id":           body.user_id,
             })
     except Exception:

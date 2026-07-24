@@ -13,6 +13,12 @@ export interface ProfileMetrics {
   last_updated:   string;
 }
 
+export interface PasswordMeta {
+  is_pwned: boolean; pwned_count: number; strength_score: number;
+  entropy_bits: number; length: number; char_types: number;
+  risk_level: string; recommendations: string[]; checked_at: string;
+}
+
 export interface Profile {
   id:          string;
   name:        string;
@@ -21,6 +27,8 @@ export interface Profile {
   metrics:     ProfileMetrics;
   notes:       string;
   is_demo:     boolean;
+  /** Detail from this user's most recent password breach check (live profiles). */
+  password_meta?: PasswordMeta | null;
 }
 
 export interface AlertRecord {
@@ -63,16 +71,17 @@ export function scoreToLevel(s: number): string {
 }
 
 export function computeUnified(m: Pick<ProfileMetrics, "gps_spoof"|"login_anomaly"|"password_leak"|"fraud_risk"|"breach_risk">): number {
-  // Weights match the backend fusion engine (src/fusion/risk_scoring.py)
-  const W_GPS = 1.5, W_LOGIN = 2.0, W_PW = 1.0, W_FRAUD = 2.5, W_BREACH = 1.8;
-  const total = W_GPS + W_LOGIN + W_PW + W_FRAUD + W_BREACH; // 8.8
-  return (
-    m.gps_spoof    * W_GPS   +
-    m.login_anomaly * W_LOGIN +
-    m.password_leak * W_PW   +
-    m.fraud_risk    * W_FRAUD +
-    m.breach_risk   * W_BREACH
-  ) / total;
+  // MUST match the backend (src/utils/profiles.py _compute_unified): a
+  // login/fraud-dominant weighted average, floored at 0.6× the strongest single
+  // module so one critical signal still reads high.
+  const clamp = (v: number) => Math.max(0, Math.min(1, v || 0));
+  const W_GPS = 0.6, W_LOGIN = 3.5, W_PW = 0.4, W_FRAUD = 3.5, W_BREACH = 0.7;
+  const total = W_GPS + W_LOGIN + W_PW + W_FRAUD + W_BREACH; // 8.7
+  const g = clamp(m.gps_spoof), l = clamp(m.login_anomaly), p = clamp(m.password_leak),
+        f = clamp(m.fraud_risk), b = clamp(m.breach_risk);
+  const weighted  = (g * W_GPS + l * W_LOGIN + p * W_PW + f * W_FRAUD + b * W_BREACH) / total;
+  const strongest = Math.max(g, l, p, f, b);
+  return Math.max(weighted, 0.6 * strongest);
 }
 
 const NOW = new Date().toISOString();
@@ -124,14 +133,16 @@ const STORAGE_KEY = "apeilo_profiles_v3";
 
 export function loadProfiles(): Profile[] {
   if (typeof window === "undefined") return DEMO_PROFILES;
+  const hidden = loadHiddenDemoIds();
+  const demos  = DEMO_PROFILES.filter(p => !hidden.includes(p.id));
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEMO_PROFILES;
+    if (!raw) return demos;
     const parsed: Profile[] = JSON.parse(raw);
     const custom = parsed.filter(p => !p.is_demo);
-    return [...DEMO_PROFILES, ...custom];
+    return [...demos, ...custom];
   } catch {
-    return DEMO_PROFILES;
+    return demos;
   }
 }
 
@@ -154,6 +165,30 @@ export function addProfile(profiles: Profile[], name: string, email: string): Pr
   const updated = [...profiles, newProfile];
   saveProfiles(updated);
   return updated;
+}
+
+/** Remove a profile by id and persist the result. */
+export function removeProfile(profiles: Profile[], id: string): Profile[] {
+  const updated = profiles.filter(p => p.id !== id);
+  saveProfiles(updated);
+  return updated;
+}
+
+/** Ids of demo profiles that have been deleted, so they don't come back on reload. */
+const HIDDEN_KEY = "apeilo_hidden_demo_profiles";
+
+export function loadHiddenDemoIds(): string[] {
+  if (typeof window === "undefined") return [];
+  try { return JSON.parse(localStorage.getItem(HIDDEN_KEY) || "[]"); } catch { return []; }
+}
+
+export function hideDemoProfile(id: string) {
+  if (typeof window === "undefined") return;
+  const ids = loadHiddenDemoIds();
+  if (!ids.includes(id)) {
+    ids.push(id);
+    localStorage.setItem(HIDDEN_KEY, JSON.stringify(ids));
+  }
 }
 
 export function updateProfileMetrics(

@@ -9,6 +9,7 @@ Falls back to a rule-based parser when Ollama is unavailable.
 """
 
 import json
+import logging
 import os
 import random
 import time
@@ -19,10 +20,15 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
-OLLAMA_BASE  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL",    "llama3.2")
+# NOTE: docker-compose sets OLLAMA_URL (not OLLAMA_BASE_URL). Read both so the
+# chatbot actually reaches the Ollama container instead of silently falling back
+# to the rule-based parser (which is why greetings returned canned answers).
+OLLAMA_BASE  = os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434"
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 
 # ── Pydantic models ───────────────────────────────────────
 
@@ -50,9 +56,16 @@ class NLQueryRequest(BaseModel):
 SYSTEM_PROMPT = """You are an AI security analyst embedded inside Aegis, a fraud and identity-threat detection platform.
 You have been given real-time risk data for all monitored users. Use this data to answer the analyst's question.
 
+If the user is just chatting — greeting you ("hi", "hello"), asking how you are,
+thanking you, or asking what you can do — use intent "conversational" and put a
+warm, natural, helpful reply in answer_prefix. In that reply, briefly mention
+what you can help with and reference the live data you can see (e.g. how many
+users are monitored and whether any are high risk). Do NOT invent a chart for
+small talk.
+
 Respond ONLY with valid JSON (no markdown, no explanation):
 {{
-  "intent": "<one of: users_by_risk | risk_over_time | module_breakdown | alert_summary | top_threats | fraud_analysis | device_risk | breach_stats | general_stats | user_detail>",
+  "intent": "<one of: conversational | users_by_risk | risk_over_time | module_breakdown | alert_summary | top_threats | fraud_analysis | device_risk | breach_stats | general_stats | user_detail>",
   "filters": {{
     "risk_level":       "<minimal | low | medium | high | critical — or null>",
     "time_range_hours": <integer 1-720>,
@@ -60,7 +73,7 @@ Respond ONLY with valid JSON (no markdown, no explanation):
     "limit":            <integer 5-50>,
     "user_name":        "<specific user name if asked about one person — or null>"
   }},
-  "chart_type":   "<bar | line | pie | table | metric>",
+  "chart_type":   "<text | bar | line | pie | table | metric>",   // use "text" for conversational
   "answer_prefix": "<2-3 sentences that directly reference the actual user names and scores in the data below>"
 }}
 
@@ -96,6 +109,12 @@ def _build_profiles_context(profiles: List[ProfilePayload]) -> str:
 
 
 async def call_ollama(query: str, history: List[Dict], profiles: List[ProfilePayload]) -> Dict:
+    """Ask the local LLM to classify the query. Falls back to rules on failure.
+
+    The returned dict carries `_llm_used` / `_llm_error` so the endpoint can
+    tell the caller whether the answer really came from the model — otherwise a
+    silent fallback looks identical to a working LLM.
+    """
     ctx     = _build_profiles_context(profiles)
     system  = SYSTEM_PROMPT.replace("{profiles_context}", ctx)
     messages = [{"role": "system", "content": system}]
@@ -104,28 +123,117 @@ async def call_ollama(query: str, history: List[Dict], profiles: List[ProfilePay
     messages.append({"role": "user", "content": query})
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{OLLAMA_BASE}/api/chat",
                 json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
             )
             resp.raise_for_status()
             content = resp.json()["message"]["content"].strip()
+            parsed  = None
             # Strip markdown fences if present
             if "```" in content:
                 for part in content.split("```"):
                     part = part.strip().lstrip("json").strip()
                     try:
-                        return json.loads(part)
+                        parsed = json.loads(part)
+                        break
                     except Exception:
                         continue
-            return json.loads(content)
-    except Exception:
-        return _rule_based_parse(query)
+            if parsed is None:
+                parsed = json.loads(content)
+            parsed["_llm_used"] = True
+            return parsed
+    except Exception as e:
+        detail = f"{type(e).__name__}: {str(e)[:160]}"
+        logger.warning("Ollama call failed (%s at %s, model=%s) — using rule-based fallback",
+                       detail, OLLAMA_BASE, OLLAMA_MODEL)
+        fallback = _rule_based_parse(query)
+        fallback["_llm_used"]  = False
+        fallback["_llm_error"] = detail
+        return fallback
+
+
+# Small talk that should get a conversational reply, not an analytics card.
+_GREETING_WORDS = {
+    "hi", "hii", "hiii", "hey", "heya", "hello", "helo", "yo", "sup",
+    "hola", "namaste", "greetings", "good morning", "good afternoon",
+    "good evening", "morning", "evening",
+}
+_CHITCHAT_PATTERNS = (
+    "how are you", "how r u", "how's it going", "hows it going", "what's up",
+    "whats up", "who are you", "what are you", "what can you do", "what do you do",
+    "help me", "what should i ask", "thank", "thanks", "thx", "ok", "okay",
+    "cool", "nice", "good job", "bye", "goodbye", "see ya",
+)
+
+
+def _is_small_talk(q: str) -> bool:
+    """True when the message is a greeting / chit-chat rather than a data question."""
+    s = q.strip().lower().strip("!?.,")
+    if not s:
+        return False
+    if s in _GREETING_WORDS:
+        return True
+    # Short messages that open with a greeting, e.g. "hey there"
+    if len(s.split()) <= 4 and any(s.startswith(g) for g in _GREETING_WORDS):
+        return True
+    return any(p in s for p in _CHITCHAT_PATTERNS)
+
+
+def _small_talk_reply(query: str, profiles: List[ProfilePayload]) -> str:
+    """A friendly, data-aware reply for greetings — no chart."""
+    q = query.strip().lower().strip("!?.,")
+    n = len(profiles)
+
+    if n:
+        critical = sum(1 for p in profiles if p.unified_score >= 0.75)
+        high     = sum(1 for p in profiles if 0.50 <= p.unified_score < 0.75)
+        avg      = sum(p.unified_score for p in profiles) / n
+        if critical:
+            top = max(profiles, key=lambda p: p.unified_score)
+            state = (f"Right now I'm watching {n} user{'s' if n != 1 else ''}, and "
+                     f"{critical} {'is' if critical == 1 else 'are'} at critical risk — "
+                     f"{top.name} is the highest at {top.unified_score:.0%}.")
+        elif high:
+            state = (f"Right now I'm watching {n} user{'s' if n != 1 else ''}; "
+                     f"{high} {'is' if high == 1 else 'are'} in the high-risk band, "
+                     f"average risk {avg:.0%}.")
+        else:
+            state = (f"Right now I'm watching {n} user{'s' if n != 1 else ''} and nothing "
+                     f"looks alarming — average risk is {avg:.0%}.")
+    else:
+        state = "I don't have any user profiles loaded yet."
+
+    if any(w in q for w in ("thank", "thx")):
+        return f"Happy to help! {state} Ask me any time you want a closer look."
+    if "bye" in q or "see ya" in q:
+        return f"Goodbye! {state} I'll keep monitoring in the background."
+    if any(p in q for p in ("who are you", "what are you", "what can you do", "what do you do", "help")):
+        return ("I'm the Aegis security analyst. I can rank users by risk, break down the "
+                "detection modules (GPS, login, password, fraud, breach), trend risk over "
+                f"time, and dig into any individual user. {state}")
+    if any(p in q for p in ("how are you", "how r u", "how's it going", "hows it going")):
+        return (f"Doing well, thanks for asking — all detection modules are running. {state} "
+                "Want me to show which users need attention?")
+
+    # Plain greeting
+    return (f"Hello! {state} You can ask me things like \"who's at critical risk?\", "
+            "\"compare login anomaly across users\", or \"what is Himanshu's risk profile?\"")
 
 
 def _rule_based_parse(query: str) -> Dict:
     q = query.lower()
+
+    if _is_small_talk(q):
+        return {
+            "intent": "conversational",
+            "filters": {"risk_level": None, "time_range_hours": 24,
+                        "module": None, "limit": 20, "user_name": None},
+            "chart_type": "text",
+            "answer_prefix": "",   # filled in by the endpoint, which has the profiles
+        }
+
     intent, chart_type = "general_stats", "metric"
     module, risk_level, time_range, limit = None, None, 24, 20
     user_name = None
@@ -449,6 +557,39 @@ def _build_top_threats(profiles: List[ProfilePayload]) -> List[Dict]:
 
 # ── Endpoint ──────────────────────────────────────────────
 
+@router.get("/health", summary="Is the local LLM reachable and is the model pulled?")
+async def query_health():
+    """Diagnose the AI-query pipeline: endpoint, reachability, and whether the
+    configured model has actually finished downloading."""
+    info: Dict[str, Any] = {
+        "ollama_url":   OLLAMA_BASE,
+        "model":        OLLAMA_MODEL,
+        "reachable":    False,
+        "model_pulled": False,
+        "models_available": [],
+        "error":        None,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(f"{OLLAMA_BASE}/api/tags")
+            resp.raise_for_status()
+            info["reachable"] = True
+            names = [m.get("name", "") for m in resp.json().get("models", [])]
+            info["models_available"] = names
+            base = OLLAMA_MODEL.split(":")[0]
+            info["model_pulled"] = any(n == OLLAMA_MODEL or n.split(":")[0] == base for n in names)
+    except Exception as e:
+        info["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+
+    if not info["reachable"]:
+        info["status"] = "unreachable — AI answers fall back to rule-based"
+    elif not info["model_pulled"]:
+        info["status"] = f"model '{OLLAMA_MODEL}' not pulled yet — still downloading, answers fall back to rule-based"
+    else:
+        info["status"] = "healthy"
+    return info
+
+
 @router.post("")
 async def nl_query(body: NLQueryRequest):
     t0 = time.perf_counter()
@@ -457,7 +598,26 @@ async def nl_query(body: NLQueryRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
     profiles = body.profiles or []
-    parsed   = await call_ollama(body.query, body.history or [], profiles)
+
+    # Greetings / small talk answer instantly from live data — no LLM round-trip,
+    # no chart. Keeps "hi" feeling like a conversation rather than a dashboard.
+    if _is_small_talk(body.query):
+        return {
+            "answer":        _small_talk_reply(body.query, profiles),
+            "chart_type":    "text",
+            "chart_data":    [],
+            "chart_config":  {},
+            "table_data":    None,
+            "table_headers": None,
+            "intent":        "conversational",
+            "query_time_ms": round((time.perf_counter() - t0) * 1000, 1),
+            "ollama_model":  OLLAMA_MODEL,
+            # Answered locally on purpose — greetings shouldn't wait on the LLM.
+            "llm_used":      False,
+            "llm_error":     None,
+        }
+
+    parsed = await call_ollama(body.query, body.history or [], profiles)
 
     intent     = parsed.get("intent",       "general_stats")
     filters    = parsed.get("filters",      {}) or {}
@@ -575,6 +735,13 @@ async def nl_query(body: NLQueryRequest):
         chart_type = "metric"
         chart_data = _build_breach_stats(profiles)
 
+    elif intent == "conversational":
+        # The model classified this as small talk — reply in plain text.
+        chart_type = "text"
+        chart_data = []
+        if not str(answer).strip():
+            answer = _small_talk_reply(body.query, profiles)
+
     else:  # general_stats
         chart_type = "metric"
         chart_data = _build_general_stats(profiles)
@@ -589,4 +756,7 @@ async def nl_query(body: NLQueryRequest):
         "intent":        intent,
         "query_time_ms": round((time.perf_counter() - t0) * 1000, 1),
         "ollama_model":  OLLAMA_MODEL,
+        # Whether the answer really came from the LLM, and why not if it didn't.
+        "llm_used":      bool(parsed.get("_llm_used")),
+        "llm_error":     parsed.get("_llm_error"),
     }

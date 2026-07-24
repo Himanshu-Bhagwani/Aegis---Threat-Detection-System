@@ -50,11 +50,11 @@ const IconActivity = () => (
 
 /* ── Feature data ────────────────────────────────────────── */
 const FEATURES = [
-  { icon: <IconMapPin />, title: "GPS Spoofing Detection", desc: "ML models detect real-time location fraud — flags mock GPS apps, emulator signals, and impossible velocity jumps in under 50ms.", color: "var(--accent)", glow: "rgba(61,127,255,0.15)" },
+  { icon: <IconMapPin />, title: "Impossible-Travel Detection", desc: "Compares each sign-in's location and time against the last, flagging journeys too far and too fast for any legitimate travel to explain.", color: "var(--accent)", glow: "rgba(61,127,255,0.15)" },
   { icon: <IconLock />, title: "Login Anomaly Engine", desc: "Behavioral baseline per user. Detects unusual login hours, new device access, rapid credential cycling, and brute-force patterns.", color: "var(--risk-medium)", glow: "rgba(245,158,11,0.12)" },
-  { icon: <IconShield />, title: "Breach Intelligence", desc: "k-anonymity HIBP lookups — only 5 chars of your SHA-1 hash ever leave the device. Scores exposure and entropy in real time.", color: "var(--risk-high)", glow: "rgba(249,115,22,0.12)" },
-  { icon: <IconCreditCard />, title: "Fraud Transaction Scoring", desc: "XGBoost + Isolation Forest ensemble. Scores each transaction across amount, geography, merchant velocity, and time-of-day signals.", color: "var(--risk-critical)", glow: "rgba(239,68,68,0.12)" },
-  { icon: <IconMonitor />, title: "Device Fingerprinting", desc: "SHA-256 stable device IDs. Weighted similarity scoring across platform, screen, timezone, WebGL renderer, and audio context.", color: "var(--risk-low)", glow: "rgba(132,204,22,0.12)" },
+  { icon: <IconShield />, title: "Breach Intelligence", desc: "Checks passwords against known breaches with HIBP k-anonymity — only a 5-character hash prefix ever reaches the API — then scores strength, entropy, and email exposure.", color: "var(--risk-high)", glow: "rgba(249,115,22,0.12)" },
+  { icon: <IconCreditCard />, title: "Fraud Transaction Scoring", desc: "Scores every transaction against each user's own spending history — how far the amount strays from their normal, how fast payments arrive, and the time of day.", color: "var(--risk-critical)", glow: "rgba(239,68,68,0.12)" },
+  { icon: <IconMonitor />, title: "New-Device Recognition", desc: "Builds a stable device signal from platform, screen, timezone, and GPU renderer, so the first sign-in from an unfamiliar browser stands out.", color: "var(--risk-low)", glow: "rgba(132,204,22,0.12)" },
   { icon: <IconZap />, title: "Unified Fusion Engine", desc: "Weighted, max-threat, and Bayesian fusion strategies combine all signals into a single actionable risk score per identity event.", color: "var(--accent-cyan)", glow: "rgba(6,182,212,0.12)" },
 ];
 
@@ -209,7 +209,7 @@ export default function LandingPage() {
             color: "var(--text-primary)",
             marginBottom: 24,
           }}>
-            Know when someone isn&apos;t<br />
+            Spot the logins and payments<br />
             <span style={{
               background: "linear-gradient(90deg, #3d7fff 0%, #06b6d4 50%, #8b5cf6 100%)",
               WebkitBackgroundClip: "text",
@@ -218,7 +218,7 @@ export default function LandingPage() {
               backgroundSize: "200% 100%",
               animation: "gradient-shift 4s ease infinite",
             }}>
-              who they say they are.
+              that aren&apos;t really them.
             </span>
           </h1>
 
@@ -229,8 +229,9 @@ export default function LandingPage() {
             maxWidth: 580, margin: "0 auto 40px",
             lineHeight: 1.75,
           }}>
-            Apeilo fuses GPS spoofing, login anomalies, breach intelligence, device fingerprints,
-            and transaction fraud into a single risk score — in under 50ms.
+            Apeilo plugs into your app and scores every sign-in and transaction — catching
+            brute-force logins, impossible travel, breached passwords, and payments that break a
+            user&apos;s pattern, then asks them to confirm before it becomes fraud.
           </p>
 
           {/* CTAs */}

@@ -41,6 +41,21 @@ AWS_REGION            = os.getenv("AWS_REGION", "us-east-1")
 AWS_ACCESS_KEY_ID     = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 
+# ─────────────────────────────────────────────
+# Local mode (self-hosted, no real AWS account)
+# ─────────────────────────────────────────────
+# When APEILO_LOCAL_MODE=true the system talks to a local DynamoDB container
+# (amazon/dynamodb-local) instead of AWS. The other cloud services (Cognito,
+# S3, SNS, CloudWatch) are disabled so no requests are ever sent to AWS —
+# their wrappers fall back to the same graceful "not configured" behaviour.
+LOCAL_MODE = os.getenv("APEILO_LOCAL_MODE", "false").lower() in ("1", "true", "yes")
+
+# DynamoDB endpoint override (used by both local mode and any custom endpoint).
+DYNAMODB_ENDPOINT_URL = os.getenv("AWS_ENDPOINT_URL_DYNAMODB", "") or os.getenv("DYNAMODB_ENDPOINT_URL", "")
+
+# Services that are switched off in local mode (they require a real AWS account).
+_LOCAL_DISABLED_SERVICES = {"cognito-idp", "s3", "sns", "cloudwatch", "logs", "secretsmanager"}
+
 COGNITO_USER_POOL_ID  = os.getenv("COGNITO_USER_POOL_ID", "")
 COGNITO_CLIENT_ID     = os.getenv("COGNITO_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.getenv("COGNITO_CLIENT_SECRET", "")
@@ -51,6 +66,7 @@ S3_LOGS_BUCKET        = os.getenv("S3_LOGS_BUCKET", "aegis-event-logs")
 DYNAMODB_EVENTS_TABLE   = os.getenv("DYNAMODB_EVENTS_TABLE", "Apeilo-events")
 DYNAMODB_PROFILES_TABLE = os.getenv("DYNAMODB_PROFILES_TABLE", "apeilo-users-profile")
 DYNAMODB_ALERTS_TABLE   = os.getenv("DYNAMODB_ALERTS_TABLE", "Apeilo-alerts")
+DYNAMODB_APIKEYS_TABLE  = os.getenv("DYNAMODB_APIKEYS_TABLE", "Apeilo-apikeys")
 
 CLOUDWATCH_NAMESPACE  = os.getenv("CLOUDWATCH_NAMESPACE", "AEGIS/ThreatDetection")
 SNS_ALERTS_TOPIC_ARN  = os.getenv("SNS_ALERTS_TOPIC_ARN", "")
@@ -61,20 +77,34 @@ SNS_ALERTS_TOPIC_ARN  = os.getenv("SNS_ALERTS_TOPIC_ARN", "")
 _clients: Dict[str, Any] = {}
 
 
-def _boto_kwargs() -> Dict[str, str]:
-    """Build common boto3 kwargs from env."""
+def _boto_kwargs(service: str = "") -> Dict[str, str]:
+    """Build common boto3 kwargs from env, adding a local endpoint for DynamoDB."""
     kwargs: Dict[str, str] = {"region_name": AWS_REGION}
     if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
         kwargs["aws_access_key_id"]     = AWS_ACCESS_KEY_ID
         kwargs["aws_secret_access_key"] = AWS_SECRET_ACCESS_KEY
+    # Point DynamoDB at the local container when an endpoint override is set.
+    if service == "dynamodb" and DYNAMODB_ENDPOINT_URL:
+        kwargs["endpoint_url"] = DYNAMODB_ENDPOINT_URL
+        # DynamoDB Local accepts any non-empty credentials — supply dummies if
+        # the real ones are blank so client construction never fails.
+        kwargs.setdefault("aws_access_key_id", "local")
+        kwargs.setdefault("aws_secret_access_key", "local")
     return kwargs
 
 
 def get_client(service: str):
-    """Return a cached boto3 client for the given service."""
+    """Return a cached boto3 client for the given service.
+
+    In local mode the cloud-only services (Cognito, S3, SNS, CloudWatch, …)
+    return None so their wrappers cleanly fall back to mock/no-op behaviour
+    without ever attempting a network call to AWS.
+    """
+    if LOCAL_MODE and service in _LOCAL_DISABLED_SERVICES:
+        return None
     if service not in _clients:
         try:
-            _clients[service] = boto3.client(service, **_boto_kwargs())
+            _clients[service] = boto3.client(service, **_boto_kwargs(service))
         except Exception as exc:
             logger.warning("Could not create boto3 client for %s: %s", service, exc)
             return None
@@ -83,10 +113,12 @@ def get_client(service: str):
 
 def get_resource(service: str):
     """Return a cached boto3 resource for the given service."""
+    if LOCAL_MODE and service in _LOCAL_DISABLED_SERVICES:
+        return None
     key = f"resource_{service}"
     if key not in _clients:
         try:
-            _clients[key] = boto3.resource(service, **_boto_kwargs())
+            _clients[key] = boto3.resource(service, **_boto_kwargs(service))
         except Exception as exc:
             logger.warning("Could not create boto3 resource for %s: %s", service, exc)
             return None
@@ -94,7 +126,9 @@ def get_resource(service: str):
 
 
 def aws_available() -> bool:
-    """Quick check: are AWS credentials configured?"""
+    """Quick check: is a data backend configured (real AWS creds or local DynamoDB)?"""
+    if LOCAL_MODE and DYNAMODB_ENDPOINT_URL:
+        return True
     return bool(AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)
 
 
@@ -425,6 +459,7 @@ def dynamo_put_event(
     event_type: str,
     scores: Dict,
     raw_input: Optional[Dict] = None,
+    tenant_id: Optional[str] = None,
     table_name: str = DYNAMODB_EVENTS_TABLE,
 ) -> Optional[str]:
     """
@@ -459,6 +494,8 @@ def dynamo_put_event(
         "scores":     _to_decimal(scores),
         "ttl":        ttl,
     }
+    if tenant_id:
+        item["tenant_id"] = tenant_id
     if raw_input:
         item["raw_input"] = _to_decimal(raw_input)
 
@@ -551,6 +588,7 @@ def dynamo_put_alert(
     alert_type: str,
     risk_score: float,
     details: Dict,
+    tenant_id: Optional[str] = None,
     table_name: str = DYNAMODB_ALERTS_TABLE,
 ) -> Optional[str]:
     """Persist a security alert to DynamoDB."""
@@ -572,6 +610,8 @@ def dynamo_put_alert(
         "status":     "open",
         "ttl":        ttl,
     }
+    if tenant_id:
+        item["tenant_id"] = tenant_id
     try:
         table = resource.Table(table_name)
         table.put_item(Item=item)
@@ -581,17 +621,115 @@ def dynamo_put_alert(
         return None
 
 
+def dynamo_find_open_alert(
+    user_id: str,
+    alert_type: str,
+    table_name: str = DYNAMODB_ALERTS_TABLE,
+) -> Optional[Dict]:
+    """Return this user's most recent still-open alert of a given type, if any."""
+    resource = get_resource("dynamodb")
+    if not resource:
+        return None
+    from boto3.dynamodb.conditions import Key, Attr
+    try:
+        table = resource.Table(table_name)
+        resp = table.query(
+            KeyConditionExpression=Key("user_id").eq(user_id),
+            FilterExpression=Attr("status").eq("open") & Attr("alert_type").eq(alert_type),
+        )
+        items = sorted(resp.get("Items", []), key=lambda x: x.get("timestamp", ""), reverse=True)
+        return _from_decimal(items[0]) if items else None
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB find_open_alert failed: %s", str(e))
+        return None
+
+
+def dynamo_upsert_alert(
+    user_id: str,
+    alert_type: str,
+    risk_score: float,
+    details: Dict,
+    tenant_id: Optional[str] = None,
+    table_name: str = DYNAMODB_ALERTS_TABLE,
+) -> Optional[str]:
+    """Coalescing alert write: if an open alert of this type already exists for
+    the user, update it in place (so repeated events don't pile up as separate
+    challenges); otherwise create a new one. Returns the alert_id."""
+    existing = dynamo_find_open_alert(user_id, alert_type, table_name)
+    if not existing:
+        return dynamo_put_alert(user_id, alert_type, risk_score, details, tenant_id, table_name)
+
+    resource = get_resource("dynamodb")
+    if not resource:
+        return None
+    merged = {**(existing.get("details") or {}), **details}
+    merged["occurrences"] = int((existing.get("details") or {}).get("occurrences", 1)) + 1
+    try:
+        table = resource.Table(table_name)
+        table.update_item(
+            Key={"user_id": user_id, "alert_id": existing["alert_id"]},
+            UpdateExpression="SET details = :d, risk_score = :r, #ts = :t",
+            ExpressionAttributeNames={"#ts": "timestamp"},
+            ExpressionAttributeValues={
+                ":d": _to_decimal(merged),
+                ":r": _to_decimal(risk_score),
+                ":t": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return existing["alert_id"]
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB upsert_alert failed: %s", str(e))
+        return None
+
+
+def dynamo_resolve_alert(
+    alert_id: str,
+    user_id: str,
+    status: str = "resolved",
+    table_name: str = DYNAMODB_ALERTS_TABLE,
+) -> bool:
+    """Set an alert's status ('confirmed' / 'denied' / 'dismissed'). Used when a
+    challenge is answered, so its outcome can be read back later."""
+    resource = get_resource("dynamodb")
+    if not resource:
+        return False
+    try:
+        table = resource.Table(table_name)
+        table.update_item(
+            Key={"user_id": user_id, "alert_id": alert_id},
+            UpdateExpression="SET #s = :s, resolved_at = :t",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":s": status,
+                ":t": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return True
+    except (ClientError, NoCredentialsError) as e:
+        logger.error("DynamoDB resolve_alert failed: %s", str(e))
+        return False
+
+
 def dynamo_get_recent_alerts(
     limit: int = 20,
+    tenant_id: Optional[str] = None,
     table_name: str = DYNAMODB_ALERTS_TABLE,
 ) -> List[Dict]:
-    """Scan for recent alerts across all users (for the dashboard alert panel)."""
+    """Scan for recent alerts (for the dashboard alert panel).
+
+    When tenant_id is given, only that tenant's alerts are returned so one
+    integrating app never sees another's events.
+    """
     resource = get_resource("dynamodb")
     if not resource:
         return []
+    from boto3.dynamodb.conditions import Attr
     try:
-        table = resource.Table(table_name)
-        resp  = table.scan(Limit=limit)
+        table  = resource.Table(table_name)
+        kwargs: Dict[str, Any] = {}
+        if tenant_id:
+            kwargs["FilterExpression"] = Attr("tenant_id").eq(tenant_id)
+        resp  = table.scan(**kwargs)
         items = sorted(
             [_from_decimal(i) for i in resp.get("Items", [])],
             key=lambda x: x.get("timestamp", ""),

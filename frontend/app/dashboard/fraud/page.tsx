@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
-import { scoreFraud, riskColor, formatScore, getWeightedUnifiedScore } from "@/lib/api";
+import { scoreFraud, riskColor, formatScore, getWeightedUnifiedScore, getTransactionStats, TransactionStats } from "@/lib/api";
 import { useProfiles } from "@/contexts/ProfileContext";
 
 const DynAmtRisk = dynamic(
@@ -11,6 +11,10 @@ const DynAmtRisk = dynamic(
 );
 const DynSignal = dynamic(
   () => import("@/components/PageChart").then(m => ({ default: m.SignalContribChart })),
+  { ssr: false }
+);
+const DynTxnAmounts = dynamic(
+  () => import("@/components/PageChart").then(m => ({ default: m.TransactionAmountChart })),
   { ssr: false }
 );
 
@@ -42,10 +46,29 @@ const IconChevronRight = () => (
 
 export default function FraudPage() {
   const { selected, updateMetrics } = useProfiles();
-  const [form, setForm] = useState({ amount: 500, hour: 14, tx_count_1h: 2, time_since_last_tx: 3600, amount_ratio: 1.0, is_international: false });
+  // Fixed seed for SSR parity, then real local hour after mount (no hydration mismatch).
+  const [form, setForm] = useState({ amount: 500, hour: 12, tx_count_1h: 2, time_since_last_tx: 3600, amount_ratio: 1.0, is_international: false });
+
+  useEffect(() => {
+    setForm(f => ({ ...f, hour: new Date().getHours() }));
+  }, []);
   const [result,  setResult]  = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [updated, setUpdated] = useState(false);
+  const [txns,    setTxns]    = useState<TransactionStats | null>(null);
+
+  // Real transactions this user has had scored (e.g. from SODA).
+  const loadTxns = useCallback(async () => {
+    if (!selected) { setTxns(null); return; }
+    try { setTxns(await getTransactionStats(selected.id)); }
+    catch { setTxns(null); }
+  }, [selected?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    loadTxns();
+    const t = setInterval(loadTxns, 8000);   // pick up new SODA transactions
+    return () => clearInterval(t);
+  }, [loadTxns]);
 
   async function run() {
     setLoading(true); setUpdated(false);
@@ -59,9 +82,15 @@ export default function FraudPage() {
         updateMetrics(selected.id, { fraud_risk: newFraud, unified_score: unified });
         setUpdated(true);
       }
+      loadTxns();
     } catch (e: any) { setResult({ error: e?.message }); }
     finally { setLoading(false); }
   }
+
+  const inr = (n: number) =>
+    n >= 1e7 ? `₹${(n / 1e7).toFixed(2)}Cr`
+    : n >= 1e5 ? `₹${(n / 1e5).toFixed(2)}L`
+    : `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 
   const resultScore = result?.fraud_probability ?? 0;
   const resultColor = riskColor(resultScore);
@@ -105,16 +134,134 @@ export default function FraudPage() {
         )}
       </div>
 
-      {/* ── Amount vs fraud risk reference ─────── */}
+      {/* ── Transaction amounts: real history when we have it ─────── */}
       <div className="panel" style={{ padding: "18px 22px" }}>
         <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em", marginBottom: 14 }}>
-          Transaction Amount vs Fraud Risk — Reference Curve
+          {txns && txns.recent.length > 0
+            ? `Transaction Amounts (INR) — ${selected?.name ?? "user"}'s Real History`
+            : "Transaction Amount vs Fraud Risk — Reference Curve"}
         </div>
-        <DynAmtRisk currentAmount={form.amount} />
-        <div style={{ fontSize: 10, color: "var(--text-disabled)", marginTop: 6 }}>
-          White dot = current amount (${form.amount.toLocaleString()}) · Red line = 60% detection threshold
-        </div>
+        {txns && txns.recent.length > 0 ? (
+          <>
+            <DynTxnAmounts txns={txns.recent} />
+            <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 6 }}>
+              Actual transactions in ₹, oldest → newest · Bar colour = fraud risk · Hover for exact amount and time
+            </div>
+          </>
+        ) : (
+          <>
+            <DynAmtRisk currentAmount={form.amount} />
+            <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 6 }}>
+              No transactions recorded for this user yet — showing the generic reference curve.
+              White dot = current amount (${form.amount.toLocaleString()}) · Red line = 60% threshold
+            </div>
+          </>
+        )}
       </div>
+
+      {/* ── Real transactions scored for this user ─────────── */}
+      {txns && txns.total_transactions > 0 && (
+        <div className="panel" style={{ padding: "18px 22px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.10em" }}>
+              Recent Transactions — Live from {selected?.name ?? "app"}
+            </div>
+            <div style={{
+              fontSize: 10, padding: "3px 9px", borderRadius: 6, fontWeight: 800,
+              textTransform: "uppercase", letterSpacing: "0.07em",
+              background: txns.risky_count > 0 ? "rgba(239,68,68,0.10)" : "rgba(0,255,136,0.08)",
+              color: txns.risky_count > 0 ? "#ef4444" : "var(--risk-minimal)",
+              border: `1px solid ${txns.risky_count > 0 ? "rgba(239,68,68,0.25)" : "rgba(0,255,136,0.2)"}`,
+            }}>
+              {txns.risky_count} risky of {txns.total_transactions}
+            </div>
+          </div>
+
+          {/* Aggregates */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 16 }}>
+            {[
+              {
+                label: "Largest transaction",
+                value: inr(txns.max_amount),
+                color: riskColor(txns.largest_txn?.risk ?? 0.8),
+                sub: txns.largest_txn?.timestamp
+                  ? new Date(txns.largest_txn.timestamp).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+                  : undefined,
+              },
+              { label: "Average transaction", value: inr(txns.avg_amount), color: "var(--text-primary)",
+                sub: `${txns.total_transactions} transactions` },
+              { label: "Transactions / hr",   value: String(txns.per_hour),
+                color: txns.per_hour > 5 ? riskColor(0.7) : "var(--text-primary)", sub: "in the last hour" },
+              { label: "Risky ratio", value: `${(txns.risky_ratio * 100).toFixed(0)}%`,
+                color: riskColor(txns.risky_ratio), sub: `${txns.risky_count} flagged` },
+              {
+                // Biggest transaction measured against the average of all the others.
+                label: "Largest vs rest",
+                value: txns.largest_vs_rest > 0
+                  ? `${txns.largest_vs_rest.toLocaleString("en-IN", { maximumFractionDigits: 0 })}×`
+                  : "—",
+                color: txns.largest_vs_rest > 5 ? riskColor(0.9) : "var(--text-primary)",
+                sub: txns.avg_excluding_largest > 0 ? `others avg ${inr(txns.avg_excluding_largest)}` : undefined,
+              },
+            ].map((s, i) => (
+              <div key={i} style={{
+                padding: "10px 13px", borderRadius: 9,
+                background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)",
+              }}>
+                <div style={{ fontSize: 9, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, marginBottom: 5 }}>
+                  {s.label}
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 800, fontFamily: "var(--font-mono)", color: s.color }}>
+                  {s.value}
+                </div>
+                {s.sub && (
+                  <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, fontWeight: 500 }}>
+                    {s.sub}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Amount bars — relative size of recent transactions */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 300, overflowY: "auto" }}>
+            {txns.recent.map((t, i) => {
+              const when = t.timestamp ? new Date(t.timestamp) : null;
+              const pct  = txns.max_amount > 0 ? Math.max(2, (t.amount / txns.max_amount) * 100) : 2;
+              return (
+                <div key={i} style={{
+                  padding: "9px 13px", borderRadius: 8,
+                  background: t.is_risky ? "rgba(239,68,68,0.05)" : "rgba(255,255,255,0.02)",
+                  border: `1px solid ${t.is_risky ? "rgba(239,68,68,0.16)" : "rgba(255,255,255,0.05)"}`,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, fontSize: 12, marginBottom: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: riskColor(t.risk), boxShadow: `0 0 7px ${riskColor(t.risk)}` }} />
+                      <span style={{ color: "var(--text-primary)", fontWeight: 700, fontFamily: "var(--font-mono)" }}>
+                        {inr(t.amount)}
+                      </span>
+                      {t.is_international && (
+                        <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 5, fontWeight: 800, color: "#f59e0b", background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.28)" }}>
+                          INTL
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0, color: "var(--text-muted)", fontSize: 11 }}>
+                      <span>{when ? when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : `${t.hour}:00`}</span>
+                      <span style={{ fontFamily: "var(--font-mono)", color: riskColor(t.risk), fontWeight: 800 }}>
+                        {(t.risk * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{ height: 4, borderRadius: 2, background: "rgba(255,255,255,0.05)", overflow: "hidden" }}>
+                    <div style={{ width: `${pct}%`, height: "100%", background: riskColor(t.risk), borderRadius: 2 }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Main grid */}
       <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>

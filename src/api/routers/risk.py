@@ -58,6 +58,9 @@ class LoginData(BaseModel):
     is_new_comp: Optional[int] = Field(0, ge=0, le=1)
     failed_10min: Optional[int] = Field(0, ge=0)
     impossible_travel: Optional[int] = Field(0, ge=0, le=1)
+    # True for a real successful sign-in, False for a failed attempt. Only
+    # successful sign-ins build a user's "normal hours" baseline.
+    success: Optional[bool] = Field(None, description="Did this sign-in attempt succeed?")
     # Pre-computed score
     anomaly_probability: Optional[float] = Field(None, ge=0, le=1)
     confidence: Optional[float] = Field(None, ge=0, le=1)
@@ -256,6 +259,8 @@ async def compute_unified_risk(body: UnifiedRiskRequest, request: Request):
         
         # Prepare GPS score
         gps_score = None
+        travel    = None
+        here      = None
         if body.gps_data:
             if body.gps_data.spoof_probability is not None:
                 gps_score = {
@@ -264,11 +269,73 @@ async def compute_unified_risk(body: UnifiedRiskRequest, request: Request):
                     "models_used": ["pre_computed"]
                 }
             elif body.gps_data.trajectory:
-                try:
-                    gps_scorer = get_gps_scorer()
-                    gps_score = gps_scorer(body.gps_data.trajectory)
-                except Exception as e:
-                    gps_score = {"spoof_probability": 0.0, "confidence": 0.0, "error": str(e)}
+                from src.utils.profiles import (
+                    round_coord, last_login_location, assess_travel,
+                )
+                from src.api.tenant_context import scope_user_id
+
+                # The model reads `latitude`/`longitude`; clients send lat/lng.
+                # Without this the coordinates silently defaulted to 0,0.
+                points = []
+                for p in body.gps_data.trajectory:
+                    lat = p.get("latitude", p.get("lat"))
+                    lng = p.get("longitude", p.get("lng", p.get("lon")))
+                    if lat is None or lng is None:
+                        continue
+                    points.append({
+                        "latitude":  round_coord(lat),
+                        "longitude": round_coord(lng),
+                        "timestamp": p.get("timestamp"),
+                    })
+
+                if points:
+                    here = points[-1]
+                    now_iso = datetime.now(timezone.utc).isoformat()
+
+                    # A single sign-in point carries no movement, so the model
+                    # sees nothing. Stitch on where this user last signed in to
+                    # form a real two-point trajectory — that's what makes
+                    # impossible travel detectable.
+                    if body.user_id and len(points) == 1:
+                        prev = last_login_location(scope_user_id(body.user_id))
+                        if prev:
+                            travel = assess_travel(
+                                prev, here["latitude"], here["longitude"], now_iso
+                            )
+                            try:
+                                t_prev = datetime.fromisoformat(
+                                    str(prev["timestamp"]).replace("Z", "+00:00")
+                                ).timestamp()
+                            except Exception:
+                                t_prev = None
+                            points = [{
+                                "latitude":  prev["lat"],
+                                "longitude": prev["lng"],
+                                "timestamp": t_prev,
+                            }] + points
+                            if points[-1].get("timestamp") is None:
+                                points[-1]["timestamp"] = datetime.now(timezone.utc).timestamp()
+
+                    try:
+                        gps_scorer = get_gps_scorer()
+                        gps_score = gps_scorer(points)
+                    except Exception as e:
+                        gps_score = {"spoof_probability": 0.0, "confidence": 0.0, "error": str(e)}
+
+                    # Physics beats the model: no journey explains 1000+ km/h.
+                    if travel and travel.get("impossible_travel"):
+                        gps_score = {
+                            **(gps_score or {}),
+                            "spoof_probability": max(0.95, (gps_score or {}).get("spoof_probability", 0)),
+                            "confidence": 0.95,
+                            "models_used": ((gps_score or {}).get("models_used") or []) + ["impossible_travel"],
+                        }
+                    elif travel and travel.get("travel_verdict") == "flight_speed":
+                        gps_score = {
+                            **(gps_score or {}),
+                            "spoof_probability": max(0.45, (gps_score or {}).get("spoof_probability", 0)),
+                            "confidence": 0.7,
+                        }
 
         # Prepare login score
         login_score = None
@@ -325,29 +392,41 @@ async def compute_unified_risk(body: UnifiedRiskRequest, request: Request):
             fusion_strategy=body.fusion_strategy
         )
 
-        # ── AWS: persist event + emit metrics ────────────
+        # Record the client's real local hour + outcome on the event so the
+        # dashboard can build a personal login-hour histogram.
+        #
+        # IMPORTANT: only record fields the caller *explicitly* sent. Internal
+        # helpers (e.g. the dashboard's unified-score recompute) post login_data
+        # without an hour, and Pydantic would otherwise hand us the field
+        # default of 12 — which showed up as phantom "12 PM" logins.
+        if body.login_data is not None:
+            explicit = body.login_data.model_fields_set
+            if "hour_of_day" in explicit and body.login_data.hour_of_day is not None:
+                result["hour_of_day"] = int(body.login_data.hour_of_day)
+            if "failed_10min" in explicit and body.login_data.failed_10min is not None:
+                result["failed_10min"] = int(body.login_data.failed_10min)
+            if body.login_data.success is not None:
+                result["login_success"] = bool(body.login_data.success)
+
+        # Persist this sign-in's location (rounded to ~110 m) so the *next*
+        # sign-in can be checked for impossible travel, plus the verdict for
+        # this one so the dashboard can explain the score.
+        if here:
+            result["geo_lat"] = here["latitude"]
+            result["geo_lng"] = here["longitude"]
+        if travel:
+            for k in ("distance_km", "hours_elapsed", "implied_kmh",
+                      "impossible_travel", "travel_verdict"):
+                if travel.get(k) is not None:
+                    result[k] = travel[k]
+
+        # ── Emit metrics ─────────────────────────────────
+        # NOTE: event persistence, alert storage, and webhook/SNS notification
+        # are handled centrally in broadcast_detection_event (fastapi_app.py)
+        # so they run once, tenant-scoped, for every detection layer.
         _start_time = time.perf_counter()
         uid     = result.get("user_id") or body.user_id or "anonymous"
         unified = result.get("unified_score", 0.0)
-
-        try:
-            dynamo_put_event(
-                user_id    = uid,
-                event_type = "unified_risk",
-                scores     = {
-                    "unified_score":  unified,
-                    "risk_level":     result.get("risk_level"),
-                    "gps_risk":       result.get("gps_risk", 0.0),
-                    "login_risk":     result.get("login_risk", 0.0),
-                    "password_risk":  result.get("password_risk", 0.0),
-                    "fraud_risk":     result.get("fraud_risk", 0.0),
-                    "breach_risk":    result.get("breach_risk", 0.0),
-                    "device_risk":    result.get("device_risk", 0.0),
-                    "primary_threats":result.get("primary_threats", []),
-                },
-            )
-        except Exception:
-            pass
 
         try:
             latency_ms = (time.perf_counter() - _start_time) * 1000
@@ -361,33 +440,7 @@ async def compute_unified_risk(body: UnifiedRiskRequest, request: Request):
         except Exception:
             pass
 
-        if unified >= CRITICAL_THRESHOLD:
-            try:
-                dynamo_put_alert(
-                    user_id    = uid,
-                    alert_type = "critical_risk",
-                    risk_score = unified,
-                    details    = {
-                        "risk_level":      result.get("risk_level"),
-                        "primary_threats": result.get("primary_threats", []),
-                        "event_id":        result.get("event_id", ""),
-                        "recommended_actions": result.get("recommended_actions", []),
-                    },
-                )
-            except Exception:
-                pass
-            try:
-                sns_alert_critical_risk(
-                    user_id             = uid,
-                    unified_score       = unified,
-                    primary_threats     = result.get("primary_threats", []),
-                    event_id            = result.get("event_id", ""),
-                    recommended_actions = result.get("recommended_actions", []),
-                )
-            except Exception:
-                pass
-
-        # ── WebSocket broadcast ───────────────────────────
+        # ── Central sink: persist + notify + WebSocket ────
         try:
             broadcast = getattr(request.app.state, "broadcast", None)
             if broadcast:

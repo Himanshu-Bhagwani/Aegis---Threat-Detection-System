@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import Sidebar from "@/components/sidebar";
 import Topbar  from "@/components/topbar";
+import ChallengeCenter from "@/components/ChallengeCenter";
 import { ProfileProvider } from "@/contexts/ProfileContext";
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -17,6 +18,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           <main className="app-main" style={{ flex: 1, overflowY: "auto" }}>
             {children}
           </main>
+          {/* "Was this you?" prompts are answered here, not in the tracked app */}
+          <ChallengeCenter />
         </div>
       </div>
     </ProfileProvider>

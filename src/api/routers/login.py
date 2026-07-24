@@ -122,6 +122,9 @@ async def score_login(body: LoginEventRequest, request: Request):
                     "risk_level":         result["risk_level"],
                     "confidence":         result["confidence"],
                     "user_id":            body.user_id,
+                    # Kept on the event so the login-hour histogram can use it.
+                    "hour_of_day":        body.hour_of_day,
+                    "failed_10min":       body.failed_10min,
                 })
         except Exception:
             pass

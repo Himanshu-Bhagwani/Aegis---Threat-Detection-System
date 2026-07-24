@@ -88,10 +88,11 @@ const NAV_AI = [
 export default function Sidebar() {
   const pathname = usePathname();
   const router   = useRouter();
-  const { profiles, selectedId, setSelectedId, alerts, addNewProfile } = useProfiles();
+  const { profiles, selectedId, setSelectedId, alerts, addNewProfile, deleteProfile } = useProfiles();
   const [showAdd, setShowAdd]   = useState(false);
   const [newName, setNewName]   = useState("");
   const [newEmail, setNewEmail] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   function handleSignOut() {
     const token = typeof window !== "undefined" ? localStorage.getItem("aegis_token") : null;
@@ -217,6 +218,56 @@ export default function Sidebar() {
               {selectedProfile.metrics.risk_level}
             </span>
           </div>
+        )}
+
+        {/* Delete the selected profile (two-step to avoid accidents) */}
+        {selectedProfile && (
+          confirmDelete ? (
+            <div style={{
+              marginTop: 8, padding: "8px 10px", borderRadius: 8,
+              background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.25)",
+            }}>
+              <div style={{ fontSize: 10, color: "var(--text-secondary)", marginBottom: 7, lineHeight: 1.5 }}>
+                Delete <b style={{ color: "var(--text-primary)" }}>{selectedProfile.name}</b>?
+                {!selectedProfile.is_demo && " Its live profile will be removed from the backend."}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  onClick={async () => { await deleteProfile(selectedProfile.id); setConfirmDelete(false); }}
+                  style={{
+                    flex: 1, fontSize: 10, fontWeight: 700, padding: "6px", borderRadius: 6,
+                    background: "rgba(239,68,68,0.85)", border: "none", color: "#fff", cursor: "pointer",
+                  }}
+                >
+                  Delete
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  style={{
+                    flex: 1, fontSize: 10, fontWeight: 700, padding: "6px", borderRadius: 6,
+                    background: "transparent", border: "1px solid rgba(255,255,255,0.12)",
+                    color: "var(--text-muted)", cursor: "pointer",
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              title={`Delete ${selectedProfile.name}`}
+              style={{
+                marginTop: 8, width: "100%", fontSize: 11, fontWeight: 600, padding: "7px",
+                borderRadius: 8, background: "transparent",
+                border: "1px solid rgba(239,68,68,0.18)",
+                color: "rgba(239,68,68,0.85)", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              }}
+            >
+              ✕ Delete profile
+            </button>
+          )
         )}
 
         {/* Add profile button */}

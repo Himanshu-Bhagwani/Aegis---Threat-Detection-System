@@ -121,11 +121,14 @@ function AssistantBubble({ msg }: { msg: Message }) {
             overflow: "hidden",
           }}>
             {/* Answer text + badges */}
-            <div style={{ padding: "16px 20px 12px" }}>
-              <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, marginBottom: 12 }}>
+            <div style={{ padding: msg.response.chart_type === "text" ? "16px 20px" : "16px 20px 12px" }}>
+              <p style={{
+                fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7,
+                marginBottom: msg.response.chart_type === "text" ? 0 : 12,
+              }}>
                 {msg.response.answer}
               </p>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <div style={{ display: msg.response.chart_type === "text" ? "none" : "flex", gap: 6, flexWrap: "wrap" }}>
                 <span style={{
                   fontSize: 9, padding: "3px 8px", borderRadius: 5,
                   background: "rgba(61,127,255,0.12)", color: "var(--accent)",
@@ -153,13 +156,16 @@ function AssistantBubble({ msg }: { msg: Message }) {
               </div>
             </div>
 
-            {/* Chart area */}
-            <div style={{ padding: "4px 20px 20px" }}>
-              <QueryChart response={msg.response} />
-            </div>
+            {/* Chart area — conversational replies are plain text, no chart */}
+            {msg.response.chart_type !== "text" && (
+              <div style={{ padding: "4px 20px 20px" }}>
+                <QueryChart response={msg.response} />
+              </div>
+            )}
 
             {/* Secondary table (shown when bar/line chart also has table_data) */}
-            {msg.response.chart_type !== "table" &&
+            {msg.response.chart_type !== "text" &&
+              msg.response.chart_type !== "table" &&
               msg.response.table_data?.length &&
               msg.response.table_headers?.length ? (
               <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", padding: "14px 20px 18px" }}>
@@ -272,7 +278,8 @@ export default function QueryPage() {
     }
   };
 
-  const showSuggestions = messages.length <= 2;
+  // Always show the suggested queries so they remain available after selecting one.
+  const showSuggestions = true;
 
   return (
     <div style={{

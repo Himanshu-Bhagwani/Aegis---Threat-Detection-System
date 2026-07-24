@@ -25,6 +25,7 @@
   /* ─── State ──────────────────────────────────────────── */
   var _cfg = {
     apiUrl:        'http://localhost:8000',
+    apiKey:        null,      // tenant API key — sent as X-Api-Key on every request
     userId:        null,
     token:         null,
     autoFingerprint: true,
@@ -52,7 +53,8 @@
   function post(path, body) {
     var url = _cfg.apiUrl + path;
     var headers = { 'Content-Type': 'application/json' };
-    if (_cfg.token) headers['Authorization'] = _cfg.token.startsWith('Bearer ') ? _cfg.token : 'Bearer ' + _cfg.token;
+    if (_cfg.token)  headers['Authorization'] = _cfg.token.startsWith('Bearer ') ? _cfg.token : 'Bearer ' + _cfg.token;
+    if (_cfg.apiKey) headers['X-Api-Key'] = _cfg.apiKey;
 
     if (typeof fetch !== 'undefined') {
       return fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(body) })

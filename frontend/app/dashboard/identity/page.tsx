@@ -5,7 +5,9 @@ import { useProfiles } from "@/contexts/ProfileContext";
 import { riskColor, formatScore } from "@/lib/api";
 import { THRESHOLDS, METRIC_LABELS } from "@/lib/profiles";
 
-const MODULE_KEYS = ["gps_spoof", "login_anomaly", "password_leak", "fraud_risk", "breach_risk"] as const;
+// Password strength/exposure is reported by the breach check, so it isn't
+// listed separately here (see MODULE_KEYS note on the overview page).
+const MODULE_KEYS = ["gps_spoof", "login_anomaly", "fraud_risk", "breach_risk"] as const;
 
 const IconUsers = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

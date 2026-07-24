@@ -36,7 +36,6 @@ const PING_POOL: Omit<GlobePing, "risk">[] = [
 const MODULE_KEYS = [
   { key: "gps_spoof",     label: "GPS Spoofing",              color: "var(--accent)" },
   { key: "login_anomaly", label: "Login Anomaly",             color: "var(--accent-cyan)" },
-  { key: "password_leak", label: "Password Leak",             color: "var(--accent-purple)" },
   { key: "fraud_risk",    label: "Fraud Possibility",         color: "var(--risk-high)" },
   { key: "breach_risk",   label: "Breach Risk",               color: "var(--risk-critical)" },
 ];

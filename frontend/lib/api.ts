@@ -6,6 +6,9 @@
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const WS_BASE  = process.env.NEXT_PUBLIC_WS_URL  || "ws://localhost:8000";
+// Tenant API key — when set, the dashboard reads/writes that tenant's data
+// (e.g. the live SODA users). Empty = the built-in default tenant.
+const API_KEY  = process.env.NEXT_PUBLIC_APEILO_API_KEY || "";
 
 // ─────────────────────────────────────────────
 // Auth token helpers
@@ -36,6 +39,7 @@ async function apiFetch<T = any>(
 ): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...(API_KEY ? { "X-Api-Key": API_KEY } : {}),
     ...(auth ? getAuthHeader() : {}),
     ...(options.headers as Record<string, string> || {}),
   };
@@ -239,6 +243,95 @@ export async function getUserEvents(userId: string, limit = 50, eventType?: stri
 export async function getAlerts(limit = 20) {
   return apiFetch(`/alerts?limit=${limit}`);
 }
+
+// ── Live profiles (real users aggregated from events) ──
+export interface RemoteProfileMetrics {
+  gps_spoof: number; login_anomaly: number; password_leak: number;
+  fraud_risk: number; breach_risk: number; unified_score: number;
+  risk_level: string; last_updated: string;
+}
+export interface RemoteProfile {
+  id: string; name: string; email: string; created_at: string;
+  is_demo: boolean; notes: string; login_count?: number; last_login?: string;
+  password_meta?: PasswordMeta | null;
+  metrics: RemoteProfileMetrics;
+}
+/** Fetch the current tenant's live user profiles (real, event-driven data). */
+export async function getProfiles(): Promise<{ profiles: RemoteProfile[]; count: number; tenant_id: string }> {
+  return apiFetch(`/profiles`);
+}
+
+// ── "Was this you?" challenges (answered here, in Apeilo) ──
+export interface Challenge {
+  alert_id: string; user_id: string; activity: string;
+  risk_score: number; risk_level: string; tone: string;
+  timestamp: string; detail: Record<string, any>;
+}
+export async function getChallenges(): Promise<{ challenges: Challenge[]; count: number }> {
+  return apiFetch(`/challenges`);
+}
+export async function verifyActivity(body: {
+  user_id: string; activity: string; confirmed: boolean;
+  risk_score?: number; detail?: Record<string, any>; alert_id?: string;
+}) {
+  return apiFetch(`/identity/verify-activity`, { method: "POST", body: JSON.stringify(body) });
+}
+/** Block login access to the account in the connected app for N minutes. */
+export async function lockdownAccount(userId: string, lockMinutes: number) {
+  return apiFetch(`/identity/lockdown`, {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId, lock_minutes: lockMinutes }),
+  });
+}
+
+/** Delete a live profile from the backend. */
+export async function deleteProfileRemote(userId: string) {
+  return apiFetch(`/profiles/${encodeURIComponent(userId)}`, { method: "DELETE" });
+}
+
+// ── Personal login-hour behaviour ──
+export interface LoginHourBucket {
+  hour: number; label: string; count: number; failed_count: number;
+  baseline: number; risk: number; familiarity: number; is_usual: boolean;
+}
+export interface LoginAttempt {
+  timestamp: string; hour: number; hour_label: string; succeeded: boolean;
+  failed_attempts: number; risk: number; event_type: string;
+}
+export interface LoginStats {
+  user_id: string; tenant_id: string;
+  total_logins: number; failed_total: number;
+  usual_hour: number | null; usual_label: string | null; usual_count: number;
+  hours: LoginHourBucket[]; recent: LoginAttempt[]; is_personalised: boolean;
+}
+/** Per-user login-hour histogram with a risk curve adapted to their habits. */
+export async function getLoginStats(userId: string): Promise<LoginStats> {
+  return apiFetch(`/identity/${encodeURIComponent(userId)}/login-stats`);
+}
+
+// ── Real transaction history (fraud view) ──
+export interface TxnRecord {
+  timestamp: string; amount: number; hour: number | null;
+  risk: number; risk_level: string; is_international: boolean; is_risky: boolean;
+}
+export interface TransactionStats {
+  user_id: string; tenant_id: string;
+  total_transactions: number; risky_count: number; risky_ratio: number;
+  avg_amount: number; avg_normal_amount: number; avg_risky_amount: number;
+  max_amount: number; total_amount: number; amount_ratio: number;
+  largest_vs_rest: number; avg_excluding_largest: number; largest_txn: TxnRecord | null;
+  per_hour: number; amount_by_hour: number[]; recent: TxnRecord[];
+}
+export async function getTransactionStats(userId: string): Promise<TransactionStats> {
+  return apiFetch(`/identity/${encodeURIComponent(userId)}/transaction-stats`);
+}
+
+/** Detail from a user's most recent password breach check. */
+export interface PasswordMeta {
+  is_pwned: boolean; pwned_count: number; strength_score: number;
+  entropy_bits: number; length: number; char_types: number;
+  risk_level: string; recommendations: string[]; checked_at: string;
+}
 export async function dismissAlert(alertId: string) {
   return apiFetch(`/alerts/${alertId}/dismiss`, { method: "POST" });
 }
@@ -268,7 +361,7 @@ export interface NLQueryRequest {
 
 export interface NLQueryResponse {
   answer:        string;
-  chart_type:    "bar" | "line" | "pie" | "table" | "metric";
+  chart_type:    "bar" | "line" | "pie" | "table" | "metric" | "text";
   chart_data:    Record<string, any>[];
   chart_config:  Record<string, any>;
   table_data:    Record<string, string>[] | null;

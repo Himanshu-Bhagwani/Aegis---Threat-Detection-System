@@ -11,11 +11,26 @@
 # ─────────────────────────────────────────────────────────────
 
 services:
+  # ── Local DynamoDB (replaces AWS DynamoDB — free, no account needed) ──
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: apeilo-dynamodb
+    # Run as root + dbPath under the working dir so the named volume is
+    # writable (avoids the common uid-1000 permission error on fresh volumes).
+    user: root
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "./data"]
+    working_dir: /home/dynamodblocal
+    ports:
+      - "8001:8000"          # host 8001 → container 8000 (avoids clashing with backend)
+    volumes:
+      - dynamodb_data:/home/dynamodblocal/data
+    restart: unless-stopped
+
   ollama:
     image: ollama/ollama:latest
     container_name: apeilo-ollama
     ports:
-      - "11434:11434"
+      - "11435:11434"          # host 11435 → container 11434 (SODA's Ollama uses 11434)
     volumes:
       - ollama_models:/root/.ollama
     environment:
@@ -53,14 +68,40 @@ services:
       - .env
     environment:
       AWS_REGION: ${AWS_REGION:-us-east-1}
+      # ── Local mode: use the DynamoDB container, disable other AWS services ──
+      APEILO_LOCAL_MODE: "true"
+      AWS_ENDPOINT_URL_DYNAMODB: http://dynamodb-local:8000
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      # Blank out dead Cognito so sign-up/sign-in use the built-in mock/local JWT
+      COGNITO_USER_POOL_ID: ""
+      COGNITO_CLIENT_ID: ""
+      COGNITO_CLIENT_SECRET: ""
+      SNS_ALERTS_TOPIC_ARN: ""
       DYNAMODB_EVENTS_TABLE: ${DYNAMODB_EVENTS_TABLE:-Apeilo-events}
       DYNAMODB_PROFILES_TABLE: ${DYNAMODB_PROFILES_TABLE:-apeilo-users-profile}
       DYNAMODB_ALERTS_TABLE: ${DYNAMODB_ALERTS_TABLE:-Apeilo-alerts}
+      DYNAMODB_APIKEYS_TABLE: ${DYNAMODB_APIKEYS_TABLE:-Apeilo-apikeys}
+      # ── Multi-tenant API key: seeds a ready-to-use key for SODA on startup ──
+      APEILO_REQUIRE_API_KEY: ${APEILO_REQUIRE_API_KEY:-false}
+      APEILO_BOOTSTRAP_API_KEY: ${APEILO_BOOTSTRAP_API_KEY:-apeilo_sk_00b7c3ac63d0827e359e88691db9f5b9a9f00125}
+      APEILO_BOOTSTRAP_TENANT: ${APEILO_BOOTSTRAP_TENANT:-soda}
+      APEILO_BOOTSTRAP_TENANT_NAME: ${APEILO_BOOTSTRAP_TENANT_NAME:-SODA Corporate Dashboard}
+      APEILO_BOOTSTRAP_WEBHOOK_URL: ${APEILO_BOOTSTRAP_WEBHOOK_URL:-http://host.docker.internal:5001/api/apeilo/webhook}
+      APEILO_BOOTSTRAP_WEBHOOK_SECRET: ${APEILO_BOOTSTRAP_WEBHOOK_SECRET:-whsec_7d0e46a69a1e5205fbe33f77b8f2af7f4c482e8f8b451b5b}
       OLLAMA_URL: http://ollama:11434
       OLLAMA_MODEL: llama3.2
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets webhooks reach apps on the host
     depends_on:
+      # Ollama only powers the optional AI-chat feature, not threat detection —
+      # start the API as soon as Ollama's container is up rather than waiting
+      # for the (large, slow) model pull to finish. Ollama keeps pulling in the
+      # background; /query/nl just returns an error until the model is ready.
       ollama:
-        condition: service_healthy
+        condition: service_started
+      dynamodb-local:
+        condition: service_started
     restart: unless-stopped
 
   frontend:
@@ -74,10 +115,13 @@ services:
       NEXT_PUBLIC_API_URL: http://localhost:8000
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
       NEXT_PUBLIC_WS_URL: ws://localhost:8000
-      NEXT_PUBLIC_OLLAMA_URL: http://localhost:11434
+      NEXT_PUBLIC_OLLAMA_URL: http://localhost:11435
+      # Tenant key so the dashboard reads the live SODA users (same tenant SODA writes to)
+      NEXT_PUBLIC_APEILO_API_KEY: ${APEILO_BOOTSTRAP_API_KEY:-apeilo_sk_00b7c3ac63d0827e359e88691db9f5b9a9f00125}
     depends_on:
       - backend
     restart: unless-stopped
 
 volumes:
   ollama_models:
+  dynamodb_data:

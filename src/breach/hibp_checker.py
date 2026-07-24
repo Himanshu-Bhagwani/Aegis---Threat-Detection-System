@@ -15,7 +15,7 @@ import re
 import math
 import hashlib
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -206,18 +206,116 @@ def score_password_breach(password: str) -> Dict:
     }
 
 
+# Throwaway / disposable mail providers — accounts here are high-churn and are
+# a common signal for fraud and abuse.
+_DISPOSABLE_DOMAINS = {
+    "mailinator.com", "guerrillamail.com", "10minutemail.com", "tempmail.com",
+    "temp-mail.org", "throwawaymail.com", "yopmail.com", "trashmail.com",
+    "sharklasers.com", "getnada.com", "dispostable.com", "fakeinbox.com",
+    "maildrop.cc", "mintemail.com", "spamgourmet.com", "mailnesia.com",
+}
+# Free consumer providers — fine, but far more exposed in credential-stuffing
+# lists than a corporate domain.
+_FREEMAIL_DOMAINS = {
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com",
+    "icloud.com", "mail.com", "gmx.com", "yandex.com", "protonmail.com",
+    "live.com", "msn.com", "rediffmail.com",
+}
+# Shared/role mailboxes — usually multiple readers, weak accountability.
+_ROLE_PREFIXES = {
+    "admin", "administrator", "info", "support", "sales", "contact", "help",
+    "billing", "office", "team", "hello", "noreply", "no-reply", "root",
+    "webmaster", "postmaster", "security", "abuse", "test", "demo",
+}
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def assess_email_risk(email: str) -> Dict:
+    """Local, always-available exposure assessment for an email address.
+
+    HIBP's breach-by-email endpoint needs a paid key. When it isn't available
+    we still return a real, explainable assessment rather than a misleading
+    "Clean" — derived from the address structure and its domain.
+    """
+    raw    = (email or "").strip()
+    lower  = raw.lower()
+    valid  = bool(_EMAIL_RE.match(lower))
+    local, _, domain = lower.partition("@")
+
+    signals: List[str] = []
+    risk = 0.10  # a valid address is never zero-risk — it's a public identifier
+
+    if not valid:
+        return {
+            "valid": False, "risk_score": 0.0, "risk_level": "unknown",
+            "signals": ["Not a valid email address format."],
+            "domain": domain, "is_disposable": False, "is_freemail": False,
+            "is_role_account": False,
+        }
+
+    is_disposable = domain in _DISPOSABLE_DOMAINS
+    is_freemail   = domain in _FREEMAIL_DOMAINS
+    is_role       = local in _ROLE_PREFIXES or any(local.startswith(p) for p in _ROLE_PREFIXES)
+
+    if is_disposable:
+        risk += 0.55
+        signals.append(f"'{domain}' is a disposable/temporary mail provider — high abuse and fraud signal.")
+    elif is_freemail:
+        risk += 0.22
+        signals.append(f"'{domain}' is a free consumer provider — heavily represented in credential-stuffing lists.")
+    else:
+        signals.append(f"'{domain}' is a custom/corporate domain — lower generic exposure.")
+
+    if is_role:
+        risk += 0.20
+        signals.append(f"'{local}@' looks like a shared role mailbox — usually multiple readers and weaker accountability.")
+
+    if len(local) <= 3:
+        risk += 0.12
+        signals.append(f"Very short local part ('{local}') — short addresses are guessed and scraped far more often.")
+
+    if local.isalpha() and len(local) <= 6:
+        risk += 0.08
+        signals.append("Simple dictionary-style address — trivially enumerable.")
+
+    if domain.count(".") == 1 and len(domain.split(".")[0]) <= 3:
+        risk += 0.05
+        signals.append("Very short domain — commonly used for throwaway addresses.")
+
+    risk = max(0.0, min(1.0, risk))
+    level = ("critical" if risk >= 0.75 else "high" if risk >= 0.50
+             else "medium" if risk >= 0.25 else "low" if risk >= 0.10 else "minimal")
+
+    return {
+        "valid": True, "risk_score": round(risk, 4), "risk_level": level,
+        "signals": signals, "domain": domain,
+        "is_disposable": is_disposable, "is_freemail": is_freemail,
+        "is_role_account": is_role,
+    }
+
+
 def check_email_breach(email: str) -> Dict:
     """
-    Check if an email address appears in known data breaches via HIBP.
-    Requires HIBP_API_KEY.
+    Check if an email address appears in known data breaches.
+
+    Uses HIBP when an API key is configured; otherwise falls back to a local
+    structural/domain assessment so the caller always gets a real answer
+    instead of a misleading "0 breaches / Clean".
     """
+    assessment = assess_email_risk(email)
+
     if not HIBP_API_KEY:
         return {
-            "email":           email,
-            "breach_count":    0,
-            "breaches":        [],
-            "api_available":   False,
-            "note":            "HIBP_API_KEY not configured",
+            "email":          email,
+            "breach_count":   0,
+            "breaches":       [],
+            "api_available":  False,
+            "verified":       False,
+            "note":           "Not verified against breach corpora (no HIBP API key) — showing local exposure assessment.",
+            "assessment":     assessment,
+            "risk_score":     assessment["risk_score"],
+            "risk_level":     assessment["risk_level"],
         }
 
     try:
@@ -231,18 +329,50 @@ def check_email_breach(email: str) -> Dict:
             },
         )
         if resp.status_code == 404:
-            return {"email": email, "breach_count": 0, "breaches": [], "api_available": True}
+            # Genuinely not in any known breach — but structural risk still applies.
+            return {
+                "email": email, "breach_count": 0, "breaches": [],
+                "api_available": True, "verified": True,
+                "assessment": assessment,
+                "risk_score": assessment["risk_score"],
+                "risk_level": assessment["risk_level"],
+                "note": "Not found in any known breach.",
+            }
         if resp.status_code == 401:
-            return {"email": email, "breach_count": 0, "breaches": [], "api_available": False, "note": "Invalid HIBP API key"}
+            return {
+                "email": email, "breach_count": 0, "breaches": [],
+                "api_available": False, "verified": False,
+                "note": "Invalid HIBP API key — showing local exposure assessment.",
+                "assessment": assessment,
+                "risk_score": assessment["risk_score"],
+                "risk_level": assessment["risk_level"],
+            }
 
         breaches = resp.json()
         names    = [b.get("Name", "Unknown") for b in breaches]
+        # Confirmed breaches dominate the score.
+        breach_risk = min(1.0, 0.55 + 0.09 * len(names))
+        combined    = max(breach_risk, assessment["risk_score"])
+        level = ("critical" if combined >= 0.75 else "high" if combined >= 0.50
+                 else "medium" if combined >= 0.25 else "low")
         return {
             "email":         email,
             "breach_count":  len(names),
             "breaches":      names[:10],   # top 10
             "api_available": True,
+            "verified":      True,
+            "assessment":    assessment,
+            "risk_score":    round(combined, 4),
+            "risk_level":    level,
+            "note":          f"Found in {len(names)} known breach{'es' if len(names) != 1 else ''}.",
         }
     except Exception as e:
         logger.warning("HIBP email check failed: %s", e)
-        return {"email": email, "breach_count": 0, "breaches": [], "api_available": False}
+        return {
+            "email": email, "breach_count": 0, "breaches": [],
+            "api_available": False, "verified": False,
+            "note": "Breach lookup unavailable — showing local exposure assessment.",
+            "assessment": assessment,
+            "risk_score": assessment["risk_score"],
+            "risk_level": assessment["risk_level"],
+        }

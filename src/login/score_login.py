@@ -304,12 +304,21 @@ def apply_rule_based_scoring(event: Dict) -> Dict[str, float]:
     """
     rules = {}
     
-    # Rule 1: Failed attempts in last 10 minutes
+    # Rule 1: Failed attempts in last 10 minutes.
+    # Repeated failures are the clearest brute-force evidence there is, so the
+    # curve is steep: a handful of failures in ten minutes is already an attack,
+    # not a forgetful user.
     failed_attempts = event.get("failed_10min", event.get("failed_attempts", 0))
-    if failed_attempts >= 5:
-        rules["brute_force_risk"] = min(failed_attempts / 10, 1.0)
+    try:
+        failed_attempts = int(failed_attempts or 0)
+    except (TypeError, ValueError):
+        failed_attempts = 0
+    if failed_attempts <= 0:
+        rules["brute_force_risk"] = 0.0
+    elif failed_attempts <= 2:
+        rules["brute_force_risk"] = 0.15 * failed_attempts      # 1-2: mistyped password
     else:
-        rules["brute_force_risk"] = failed_attempts / 10
+        rules["brute_force_risk"] = min(0.95, 0.12 * failed_attempts + 0.20)
     
     # Rule 2: Impossible travel (if provided)
     if event.get("impossible_travel", 0) == 1:
@@ -332,9 +341,11 @@ def apply_rule_based_scoring(event: Dict) -> Dict[str, float]:
     else:
         rules["off_hours_risk"] = 0.0
     
-    # Rule 5: Device/location change
+    # Rule 5: Device/location change. A first-ever device is only mildly notable
+    # on its own (a brand-new sign-up looks identical to this), so it's a nudge,
+    # not a verdict.
     if event.get("device_changed", event.get("is_new_comp", 0)) == 1:
-        rules["device_change_risk"] = 0.3
+        rules["device_change_risk"] = 0.2
     else:
         rules["device_change_risk"] = 0.0
     
@@ -347,9 +358,21 @@ def apply_rule_based_scoring(event: Dict) -> Dict[str, float]:
     else:
         rules["dormant_account_risk"] = 0.0
     
-    # Aggregate rule score
-    rules["combined_rule_score"] = min(sum(rules.values()) / 3, 1.0)
-    
+    # Aggregate rule score.
+    # Previously this was sum(...) / 3 — an arbitrary divisor that buried any
+    # single strong signal (8 failed logins scored 0.8 on its own rule but only
+    # 0.27 combined). Noisy-OR treats each rule as independent evidence: one
+    # severe rule stands on its own, and additional rules can only push it up.
+    independent = [max(0.0, min(1.0, float(v))) for v in rules.values()]
+    product = 1.0
+    for r in independent:
+        product *= (1.0 - r)
+    rules["combined_rule_score"] = round(1.0 - product, 4)
+
+    # The strongest single piece of evidence, used as a floor downstream so a
+    # confident rule can't be averaged away by unrelated models.
+    rules["max_rule_score"] = round(max(independent) if independent else 0.0, 4)
+
     return rules
 
 
@@ -399,11 +422,26 @@ def score_login_event(event: Dict, include_rules: bool = True) -> Dict:
     else:
         ml_combined = 0.5  # Neutral if no models available
     
-    # Combine ML with rules
+    # Combine ML with rules.
+    #
+    # The ML ensemble was trained on the LANL enterprise-auth dataset, whose
+    # features (user/computer connection degree, corporate timing) don't exist
+    # for a web login — the integration sends placeholder values. In this domain
+    # the GBM rates almost every login ~0.8 "anomalous", so the old 70/30 blend
+    # put a *clean, successful* sign-in at ~56%. That's the 58% you saw.
+    #
+    # The rules capture the signals that actually matter for a web login (failed
+    # attempts, off-hours, new device, impossible travel), so they lead. ML is
+    # kept only as a small nudge until it can be retrained on real web data.
     if include_rules and rule_scores:
         rule_combined = rule_scores.get("combined_rule_score", 0.0)
-        # ML models get 70% weight, rules get 30%
-        final_score = 0.7 * ml_combined + 0.3 * rule_combined
+        final_score = 0.12 * ml_combined + 0.88 * rule_combined
+
+        # A confident rule (brute force, impossible travel) must not be averaged
+        # away — it sets a floor on the final score.
+        strongest_rule = rule_scores.get("max_rule_score", 0.0)
+        if strongest_rule >= 0.6:
+            final_score = max(final_score, strongest_rule)
     else:
         final_score = ml_combined
     
