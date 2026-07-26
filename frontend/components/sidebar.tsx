@@ -81,10 +81,6 @@ const NAV_MANAGEMENT = [
   { href: "/dashboard/alerts",   icon: <IconBell />,   label: "Alerts" },
 ];
 
-const NAV_AI = [
-  { href: "/dashboard/query", icon: <IconSearch />, label: "AI Query" },
-];
-
 export default function Sidebar() {
   const pathname = usePathname();
   const router   = useRouter();
@@ -342,20 +338,6 @@ export default function Sidebar() {
 
         <div className="section-tag" style={{ marginTop: 12 }}>Management</div>
         {NAV_MANAGEMENT.map(n => <NavLink key={n.href} {...n} />)}
-
-        <div className="section-tag" style={{ marginTop: 12 }}>AI</div>
-        {NAV_AI.map(n => (
-          <a key={n.href} href={n.href} className={`nav-item ${pathname === n.href ? "active" : ""}`}>
-            <span style={{ flexShrink: 0, opacity: pathname === n.href ? 1 : 0.55, color: "var(--accent-purple)" }}>{n.icon}</span>
-            <span style={{ flex: 1 }}>{n.label}</span>
-            <span style={{
-              fontSize: 9, padding: "2px 6px", borderRadius: 5,
-              background: "rgba(139,92,246,0.15)", color: "var(--accent-purple)",
-              border: "1px solid rgba(139,92,246,0.3)", fontWeight: 800,
-              letterSpacing: "0.06em",
-            }}>LLM</span>
-          </a>
-        ))}
       </nav>
 
       {/* ── Footer ────────────────────────────────── */}
