@@ -1,6 +1,6 @@
 /**
- * ApeiloProvider + useApeilo — for SODA (Vite + React)
- * ====================================================
+ * ApeiloProvider + useApeilo (React)
+ * ==================================
  * Copy to:  frontend/src/context/ApeiloContext.jsx
  *
  * Responsibilities:
@@ -88,7 +88,9 @@ export function ApeiloProvider({
       localStorage.removeItem("refreshToken");
       localStorage.removeItem("user");
       if (reason) sessionStorage.setItem("auth_signed_out_reason", reason);
-      window.dispatchEvent(new CustomEvent("soda:session-expired"));
+      // Your app's auth layer should listen for this and drop to the login
+      // screen (see the README "Forced sign-out" section).
+      window.dispatchEvent(new CustomEvent("apeilo:session-revoked"));
     } catch { /* ignore */ }
   }
 

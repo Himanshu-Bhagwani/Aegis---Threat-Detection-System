@@ -1,11 +1,11 @@
 /**
- * Apeilo client for SODA (Vite + React)
- * =====================================
+ * Apeilo client (framework-agnostic; works with React, Vue, plain JS, …)
+ * ======================================================================
  * A tiny, dependency-free wrapper around the Apeilo Threat Detection API.
- * Copy to:  frontend/src/services/apeiloClient.js
+ * Drop it into your app, e.g. src/services/apeiloClient.js
  *
- * Every request carries SODA's `X-Api-Key`, so all of SODA's events, user
- * profiles and alerts stay in SODA's own isolated namespace on Apeilo.
+ * Every request carries your app's `X-Api-Key`, so all of your events, user
+ * profiles and alerts stay in your own isolated tenant namespace on Apeilo.
  */
 
 function toLevel(v) {
@@ -101,7 +101,7 @@ export function setConsent(allowed) {
 
 /* ── Geolocation ─────────────────────────────────────────────────────────
    Browsers only reliably show the permission prompt for a call made during a
-   user gesture, so SODA calls requestLocation() from the sign-in click. The
+   user gesture, so call requestLocation() from your sign-in click handler. The
    result is cached here and reused by the login scoring that follows.     */
 
 let _lastPosition = null;

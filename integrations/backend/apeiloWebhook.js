@@ -1,10 +1,10 @@
 /**
- * Apeilo webhook receiver for SODA (Express / Node)
- * =================================================
- * Copy to:  backend/routes/apeiloWebhook.js
+ * Apeilo webhook receiver (Express / Node)
+ * ========================================
+ * Drop it into your backend, e.g. backend/routes/apeiloWebhook.js
  *
  * Apeilo POSTs here whenever a tracked user crosses the threat threshold. The
- * request is signed with SODA's webhook secret; we verify it before trusting
+ * request is signed with your webhook secret; we verify it before trusting
  * the payload, then react (notify the user, force re-auth, write an audit row).
  *
  * IMPORTANT — raw body:
@@ -53,7 +53,7 @@ router.post("/webhook", express.raw({ type: "*/*" }), (req, res) => {
       `${(threat.primary_threats || []).join(", ")} (score ${threat.risk_score})`,
   );
 
-  // TODO for SODA — do something useful, e.g.:
+  // TODO — do something useful for your app, e.g.:
   //   await notifyUser(threat.user_id, threat);          // email / in-app banner
   //   if (threat.risk_level === "critical") await forceReauth(threat.user_id);
   //   await db.query("INSERT INTO security_events ...", [threat.user_id, ...]);
